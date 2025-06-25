@@ -98,7 +98,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     // 1. Get resources
     let (_d2d_factory, _wic_factory, d2d_device) = get_d2d_resources()?;
     let d2d_context: ID2D1DeviceContext5 = {
-        let dc = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
+        let dc = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
         dc.cast()?
     };
 
