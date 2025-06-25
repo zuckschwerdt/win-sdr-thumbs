@@ -167,13 +167,18 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             let dest_row = &mut dest_pixels[dest_row_start .. dest_row_start + dest_stride_usize];
 
             for (dest_chunk, src_chunk) in dest_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
-                let (b, g, r, a) = (src_chunk[0], src_chunk[1], src_chunk[2], src_chunk[3]);
-                if a > 0 {
+                let a = src_chunk[3];
+
+                if a == 255 { // FAST PATH 1: Pixel is fully opaque. Just copy it directly.
+                    dest_chunk.copy_from_slice(src_chunk);
+                } else if a > 0 {
+                    // GENERAL CASE: Pixel is semi-transparent. Perform the full calculation.
+                    let (b, g, r) = (src_chunk[0], src_chunk[1], src_chunk[2]);
                     dest_chunk[0] = (((b as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[1] = (((g as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[2] = (((r as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[3] = a;
-                } else {
+                } else { // FAST PATH 2:Pixel is fully transparent. a == 0
                     dest_chunk.copy_from_slice(&[0, 0, 0, 0]);
                 }
             }
