@@ -168,18 +168,21 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
             for (dest_chunk, src_chunk) in dest_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
                 let a = src_chunk[3];
-
-                if a == 255 { // FAST PATH 1: Pixel is fully opaque. Just copy it directly.
+                
+                // Un-premultiply the color channels based on the alpha value. We'll include fast paths for fully opaque and fully transparent pixels, since an SVG is likely to be mostly made of those.
+                // Fast Path 1: Pixel is fully opaque. Just copy it directly.
+                if a == 255 {
                     dest_chunk.copy_from_slice(src_chunk);
-                } else if a > 0 {
-                    // GENERAL CASE: Pixel is semi-transparent. Perform the full calculation.
+                // Fast Path 2: Pixel is fully transparent.
+                } else if a == 0 {
+                    dest_chunk.copy_from_slice(&[0, 0, 0, 0]);
+                // Pixel alpha is between 0 and 255, aka partially transparent. So we need to calculate the un-premultiplied color.
+                } else {
                     let (b, g, r) = (src_chunk[0], src_chunk[1], src_chunk[2]);
                     dest_chunk[0] = (((b as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[1] = (((g as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[2] = (((r as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
                     dest_chunk[3] = a;
-                } else { // FAST PATH 2:Pixel is fully transparent. a == 0
-                    dest_chunk.copy_from_slice(&[0, 0, 0, 0]);
                 }
             }
         }
