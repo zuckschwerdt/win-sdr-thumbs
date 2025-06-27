@@ -523,7 +523,7 @@ const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0x95724385_3234_4ea4_
 extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *const std::ffi::c_void) -> BOOL {
     if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
         //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
-        MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Relaxed);
+        MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Release);
     }
     true.into()
 }
@@ -627,7 +627,7 @@ fn create_registry_keys() -> Result<()> {
 }
 
 fn get_dll_path() -> String {
-    let handle_ptr: *mut std::ffi::c_void = MODULE_HANDLE.load(Ordering::Relaxed);
+    let handle_ptr: *mut std::ffi::c_void = MODULE_HANDLE.load(Ordering::Acquire);
     
     // Check for null pointer to avoid potential crashes
     if handle_ptr.is_null() {
