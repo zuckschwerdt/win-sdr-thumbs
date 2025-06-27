@@ -57,6 +57,27 @@ To uninstall, run the following command in an administrator Command Prompt:
   regsvr32 /u win_svg_thumbs.dll
   ```
 
+## How it works (Technical Details)
+
+When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with this DLL through a series of steps:
+
+1.  **Initialization**: Explorer provides the `.svg` file's data as a stream to the DLL. The provider reads this entire stream into memory.
+2.  **Direct2D Rendering**:
+    * The provider uses the **Direct2D** graphics API for high-performance, hardware-accelerated rendering.
+    * It creates a GPU-based bitmap to serve as a render target.
+    * The Direct2D API turns the SVG data into a `SvgDocument` object. The `viewport` attribute is set to the thumbnail size requested by Explorer.
+    * The `width` and `height` attributes are removed from the root `<svg>` element before drawing, which I discovered causes the `DrawSvgDocument` method to autoscale the image to the viewport, avoiding the need to do any manual scaling to fill the thumbnail.
+    * The `SvgDocument` is then drawn onto the render target bitmap.
+3.  **Pixel Data Transfer**:
+    * The rendered image is copied from the GPU render target to a "staging" bitmap on the CPU, which allows the program to access the raw pixel data.
+    * This data is in a 32-bit BGRA format with **premultiplied alpha**.
+4.  **Creating the Final Thumbnail**:
+    * A standard Windows GDI `HBITMAP` is created, which is the final format Explorer needs for the thumbnail.
+    * The pixel data is copied from the staging bitmap to the final `HBITMAP`.
+       * The GDI requires straight-alpha (as opposed to pre-multiplied), so during this process, the alpha is **un-premultiplied**.
+       * The un-premultiplication step is necessary for displaying transparency correctly and prevents dark edges from appearing on the final thumbnail.
+5.  **Safety**: The entire thumbnail generation process is wrapped in a panic handler (`catch_unwind`). This ensures that if any unexpected error occurs during rendering, it will not crash the host application (e.g., `explorer.exe`).
+
 ## How to Compile it Yourself
 
 ### Prerequisites
