@@ -29,7 +29,6 @@ use windows::{
             Direct3D11,
             Dxgi,
             Gdi,
-            Imaging,
         },
         System::{
             self,
@@ -88,7 +87,6 @@ macro_rules! ffi_guard {
 // --- Thread-local storage for COM objects that cannot be shared between threads ---
 thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
-    static WIC_FACTORY: RefCell<Option<Imaging::IWICImagingFactory>> = RefCell::new(None);
     static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
     static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
 }
