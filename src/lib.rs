@@ -94,6 +94,15 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, IWICImagingFactory, ID2D1Device
     Ok((d2d_factory, wic_factory, d2d_device))
 }
 
+// A simple struct to manage the HDC lifetime
+struct DeviceContextGuard(HDC);
+
+impl Drop for DeviceContextGuard {
+    fn drop(&mut self) {
+        // This is guaranteed to be called when the guard goes out of scope
+        unsafe { ReleaseDC(None, self.0) };
+    }
+}
 
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<HBITMAP> {
@@ -171,7 +180,11 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
         biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0 as u32, ..Default::default()
     }, ..Default::default() };
-    let hdc = unsafe { GetDC(None) };
+
+    // Automatically release the HDC when it goes out of scope
+    let hdc_guard = DeviceContextGuard(unsafe { GetDC(None) });
+    let hdc = hdc_guard.0; // Use the raw handle
+
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0)? };
 
@@ -213,7 +226,6 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     // 9. Unmap the staging bitmap and release resources
     unsafe {
         staging_bitmap.Unmap()?;
-        ReleaseDC(None, hdc);
     }
 
     Ok(hbitmap)
