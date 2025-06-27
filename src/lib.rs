@@ -58,7 +58,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
                 // S_FALSE means COM was already initialized, which is fine
                 // S_OK means we successfully initialized COM
                 // Any other result is a real error we should propagate
-            let hr = unsafe { Com::CoInitializeEx(None, Com::COINIT_APARTMENTTHREADED) };
+            let hr: HRESULT = unsafe { Com::CoInitializeEx(None, Com::COINIT_APARTMENTTHREADED) };
             if hr != S_OK && hr != S_FALSE {
                 return Err(Error::new(hr, "Failed to initialize COM"));
             }
@@ -94,7 +94,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             let dxgi_device: Dxgi::IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
 
             // 2. Create the D2D Device from the D3D11 device
-            let d2d_dev = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
+            let d2d_dev: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
             *device_ref = Some(d2d_dev);
         }
         Ok(device_ref.as_ref().unwrap().clone())
@@ -104,7 +104,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
     let d2d_context = D2D_CONTEXT.with(|context| -> Result<ID2D1DeviceContext5> {
         let mut context_ref = context.borrow_mut();
         if context_ref.is_none() {
-            let dc = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
+            let dc: ID2D1DeviceContext = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
             let dc5: ID2D1DeviceContext5 = dc.cast()?;
             *context_ref = Some(dc5);
         }
@@ -142,7 +142,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
         ..Default::default()
     };
-    let render_target_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+    let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
 
     // 3. Set target and draw the SVG, then apply UnPremultiply effect
     unsafe { d2d_context.SetTarget(&render_target_bitmap) };
@@ -154,7 +154,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
 
     // Create the SVG document from the stream of SVG data
-    let svg_doc = unsafe { d2d_context.CreateSvgDocument(
+    let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
         &stream,
         D2D_SIZE_F { 
             width: width as f32, 
@@ -175,10 +175,10 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
     
     // Apply UnPremultiply effect
-    let final_bitmap = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
+    let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
         Ok(unpremultiply_effect) => {
             // Create a second render target bitmap for the UnPremultiply effect output
-            let output_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+            let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
             
             // Switch to the output bitmap as the target
             unsafe { d2d_context.SetTarget(&output_bitmap) };
@@ -220,7 +220,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         ..Default::default()
     };
-    let staging_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
+    let staging_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
 
     // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
     // This copies the pixel data but it's still in D2D's memory space
@@ -228,7 +228,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
     // 6. Map the staging bitmap to get a pointer to the pixel data
     // This gives us a CPU-readable pointer to the D2D staging bitmap's memory
-    let mapped_rect = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ) }?;
+    let mapped_rect: D2D1_MAPPED_RECT = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ) }?;
 
     // 7. Create the final GDI HBITMAP
     // This creates a separate GDI bitmap with its own memory buffer
@@ -238,18 +238,18 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     }, ..Default::default() };
 
     // Automatically release the HDC when it goes out of scope
-    let hdc_guard = DeviceContextGuard(unsafe { Gdi::GetDC(None) });
-    let hdc = hdc_guard.0; // Use the raw handle
+    let hdc_guard: DeviceContextGuard = DeviceContextGuard(unsafe { Gdi::GetDC(None) });
+    let hdc: Gdi::HDC = hdc_guard.0; // Use the raw handle
 
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap = unsafe { Gdi::CreateDIBSection(Some(hdc), &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
+    let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(Some(hdc), &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
     // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
     if !dib_data.is_null() {
         // Create safe slices from the raw pointers
-        let source_data = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
-        let dest_data = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
+        let source_data: &[u8] = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
+        let dest_data: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
         
         // Since the UnPremultiply effect already handled the alpha conversion, we can do a simple memory copy if the stride matches
         if mapped_rect.pitch == (width * 4) {
@@ -257,12 +257,12 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             dest_data.copy_from_slice(&source_data[..dest_data.len()]);
         } else {
             // Copy row by row to handle stride differences
-            let dest_stride = (width * 4) as usize;
-            let source_stride = mapped_rect.pitch as usize;
+            let dest_stride: usize = (width * 4) as usize;
+            let source_stride: usize = mapped_rect.pitch as usize;
             
             for y in 0..height as usize {
-                let src_start = y * source_stride;
-                let dest_start = y * dest_stride;
+                let src_start: usize = y * source_stride;
+                let dest_start: usize = y * dest_stride;
                 dest_data[dest_start..dest_start + dest_stride]
                     .copy_from_slice(&source_data[src_start..src_start + dest_stride]);
             }
@@ -315,13 +315,13 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
             // Now that we have a valid `IStream`, cast it to the interface with the Read method.
             let seq_stream: Com::ISequentialStream = stream.cast()?;
 
-            let mut buffer = Vec::new();
-            let mut chunk = vec![0u8; 65536];
+            let mut buffer: Vec<u8> = Vec::new();
+            let mut chunk: Vec<u8>  = vec![0u8; 65536];
             
             loop {
-                let mut bytes_read = 0;
+                let mut bytes_read: u32 = 0;
                 
-                let hr = unsafe {
+                let hr: HRESULT = unsafe {
                     seq_stream.Read(
                         chunk.as_mut_ptr() as *mut core::ffi::c_void,
                         chunk.len() as u32,
@@ -455,7 +455,7 @@ impl Com::IClassFactory_Impl for ClassFactory_Impl {
         let thumbnail_provider: IUnknown = ThumbnailProvider::default().into();
         
         // Query for the interface requested by the caller and return it.
-        let hr = unsafe { thumbnail_provider.query(&*riid, ppvobject) };
+        let hr: HRESULT = unsafe { thumbnail_provider.query(&*riid, ppvobject) };
 
         //log_message(&format!("ClassFactory::CreateInstance: Exiting with HRESULT: {:?}", hr));
         
@@ -520,7 +520,7 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
     let factory: Com::IClassFactory = ClassFactory::default().into();
     
     // Query for the interface the caller wants (usually IClassFactory) and return it.
-    let hr = unsafe { factory.query(riid, ppv) };
+    let hr: HRESULT = unsafe { factory.query(riid, ppv) };
     
     // This is important! The factory is created with a ref count of 1. `query` increments it to 2.
     // We must release our original reference so that only the caller holds a reference.
@@ -553,7 +553,7 @@ fn to_pcwstr(s: &str) -> Vec<u16> {
 
 fn create_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-    let dll_path = get_dll_path();
+    let dll_path: String = get_dll_path();
 
     // Prepare string values outside unsafe block
     let clsid_wide = to_pcwstr(&clsid_string);
@@ -598,10 +598,10 @@ fn create_registry_keys() -> Result<()> {
 }
 
 fn get_dll_path() -> String {
-    let handle_ptr = MODULE_HANDLE.load(Ordering::Relaxed);
-    let handle = HMODULE(handle_ptr);
+    let handle_ptr: *mut std::ffi::c_void = MODULE_HANDLE.load(Ordering::Relaxed);
+    let handle: HMODULE = HMODULE(handle_ptr);
     let mut path = vec![0u16; MAX_PATH as usize];
-    let len = unsafe { System::LibraryLoader::GetModuleFileNameW(Some(handle), &mut path) };
+    let len: u32 = unsafe { System::LibraryLoader::GetModuleFileNameW(Some(handle), &mut path) };
     String::from_utf16_lossy(&path[..len as usize])
 }
 
