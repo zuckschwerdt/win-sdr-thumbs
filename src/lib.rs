@@ -114,13 +114,33 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
     Ok((d2d_factory, d2d_device, d2d_context))
 }
 
-// A simple struct to manage the HDC lifetime
+// RAII guards for automatic resource cleanup
 struct DeviceContextGuard(Gdi::HDC);
 
 impl Drop for DeviceContextGuard {
     fn drop(&mut self) {
-        // This is guaranteed to be called when the guard goes out of scope
         unsafe { Gdi::ReleaseDC(None, self.0) };
+    }
+}
+
+// RAII wrapper for D2D bitmap mapping - automatically unmaps when dropped
+struct BitmapMapGuard<'a> {
+    bitmap: &'a ID2D1Bitmap1,
+    mapped: bool,
+}
+
+impl<'a> BitmapMapGuard<'a> {
+    fn new(bitmap: &'a ID2D1Bitmap1) -> Result<(Self, D2D1_MAPPED_RECT)> {
+        let mapped_rect = unsafe { bitmap.Map(D2D1_MAP_OPTIONS_READ)? };
+        Ok((Self { bitmap, mapped: true }, mapped_rect))
+    }
+}
+
+impl<'a> Drop for BitmapMapGuard<'a> {
+    fn drop(&mut self) {
+        if self.mapped {
+            unsafe { let _ = self.bitmap.Unmap(); }
+        }
     }
 }
 
@@ -226,9 +246,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     // This copies the pixel data but it's still in D2D's memory space
     unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None) }?;
 
-    // 6. Map the staging bitmap to get a pointer to the pixel data
-    // This gives us a CPU-readable pointer to the D2D staging bitmap's memory
-    let mapped_rect: D2D1_MAPPED_RECT = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ) }?;
+    // 6. Map the staging bitmap to get a pointer to the pixel data using RAII guard
+    let (map_guard, mapped_rect) = BitmapMapGuard::new(&staging_bitmap)?;
 
     // 7. Create the final GDI HBITMAP
     // This creates a separate GDI bitmap with its own memory buffer
@@ -239,7 +258,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
     // Automatically release the HDC when it goes out of scope
     let hdc_guard: DeviceContextGuard = DeviceContextGuard(unsafe { Gdi::GetDC(None) });
-    let hdc: Gdi::HDC = hdc_guard.0; // Use the raw handle
+    let hdc: Gdi::HDC = hdc_guard.0;
 
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(Some(hdc), &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
@@ -269,11 +288,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         }
     }
 
-    // 9. Unmap the staging bitmap and release resources
-    // Note: We ignore unmapping errors since the bitmap data has already been successfully copied
-    unsafe {
-        let _ = staging_bitmap.Unmap();
-    }
+    // The map_guard will automatically unmap the bitmap when it goes out of scope
+    drop(map_guard);
 
     Ok(hbitmap)
 }
@@ -445,6 +461,11 @@ impl Com::IClassFactory_Impl for ClassFactory_Impl {
     fn CreateInstance(&self, punkouter: Ref<'_, IUnknown>, riid: *const GUID, ppvobject: *mut *mut std::ffi::c_void) -> Result<()> {
         //log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
 
+        // Safety checks for null pointers
+        if riid.is_null() || ppvobject.is_null() {
+            return Err(Error::new(E_POINTER, "Null pointer passed to CreateInstance"));
+        }
+
         // We do not support aggregation.
         if !punkouter.is_null() {
             //log_message("ClassFactory::CreateInstance: Error - Aggregation not supported.");
@@ -483,7 +504,7 @@ impl Com::IClassFactory_Impl for ClassFactory_Impl {
 
 // A global reference counter for the DLL itself.
 static DLL_REFERENCES: AtomicU32 = AtomicU32::new(0);
-// A global handle to the DLL module instance.
+// A global handle to the DLL module instance - using Option for safer null checking
 static MODULE_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 fn dll_add_ref() {
@@ -510,6 +531,11 @@ extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut std::ffi::c_void) -> HRESULT {
+    // Safety checks for null pointers
+    if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+        return E_POINTER;
+    }
+
     // Check if the caller is asking for our specific class.
     if unsafe { *rclsid } != CLSID_SVG_THUMBNAIL_PROVIDER {
         //log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
@@ -563,33 +589,36 @@ fn create_registry_keys() -> Result<()> {
     let clsid_value = to_pcwstr(&clsid_string);
 
     unsafe {
-        // Create CLSID\{our-clsid}
-        let mut key = HKEY::default();
-        RegCreateKeyW(HKEY_CLASSES_ROOT, w!("CLSID"), &mut key).ok()?;
-        let mut clsid_key = HKEY::default();
-        RegCreateKeyW(key, PCWSTR(clsid_wide.as_ptr()), &mut clsid_key).ok()?;
-        RegSetValueExW(clsid_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2))).ok()?;
-        let _ = RegCloseKey(key);
+        // Create CLSID\{our-clsid} - using RAII wrapper for automatic cleanup
+        let clsid_root_key = {
+            let mut key = HKEY::default();
+            RegCreateKeyW(HKEY_CLASSES_ROOT, w!("CLSID"), &mut key).ok()?;
+            RegistryKeyGuard(key)
+        };
+        
+        let clsid_key = clsid_root_key.create_subkey(&PCWSTR(clsid_wide.as_ptr()))?;
+        RegSetValueExW(clsid_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2))).ok()?;
 
         // Create CLSID\{our-clsid}\InprocServer32
-        let mut inproc_key = HKEY::default();
-        RegCreateKeyW(clsid_key, w!("InprocServer32"), &mut inproc_key).ok()?;
-        RegSetValueExW(inproc_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
-        RegSetValueExW(inproc_key, w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
-        let _ = RegCloseKey(inproc_key);
-        let _ = RegCloseKey(clsid_key);
+        let inproc_key = clsid_key.create_subkey(&w!("InprocServer32"))?;
+        RegSetValueExW(inproc_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
+        RegSetValueExW(inproc_key.get(), w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
 
         // Associate with .svg files
-        let mut svg_key = HKEY::default();
-        RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut svg_key).ok()?;
-        RegSetValueExW(svg_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
-        let _ = RegCloseKey(svg_key);
+        let svg_key = {
+            let mut key = HKEY::default();
+            RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut key).ok()?;
+            RegistryKeyGuard(key)
+        };
+        RegSetValueExW(svg_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         // Associate with .svgz files
-        let mut svgz_key = HKEY::default();
-        RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut svgz_key).ok()?;
-        RegSetValueExW(svgz_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
-        let _ = RegCloseKey(svgz_key);
+        let svgz_key = {
+            let mut key = HKEY::default();
+            RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut key).ok()?;
+            RegistryKeyGuard(key)
+        };
+        RegSetValueExW(svgz_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None);
     }
@@ -599,10 +628,42 @@ fn create_registry_keys() -> Result<()> {
 
 fn get_dll_path() -> String {
     let handle_ptr: *mut std::ffi::c_void = MODULE_HANDLE.load(Ordering::Relaxed);
+    
+    // Check for null pointer to avoid potential crashes
+    if handle_ptr.is_null() {
+        return String::new(); // Return empty string if handle is invalid
+    }
+    
     let handle: HMODULE = HMODULE(handle_ptr);
     let mut path = vec![0u16; MAX_PATH as usize];
     let len: u32 = unsafe { System::LibraryLoader::GetModuleFileNameW(Some(handle), &mut path) };
-    String::from_utf16_lossy(&path[..len as usize])
+    
+    // Additional safety check - ensure we don't go beyond the buffer
+    let len = std::cmp::min(len as usize, path.len());
+    String::from_utf16_lossy(&path[..len])
+}
+
+// RAII wrapper for registry keys - automatically closes when dropped
+struct RegistryKeyGuard(HKEY);
+
+impl Drop for RegistryKeyGuard {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe { let _ = RegCloseKey(self.0); }
+        }
+    }
+}
+
+impl RegistryKeyGuard {
+    fn create_subkey(&self, name: &PCWSTR) -> Result<RegistryKeyGuard> {
+        let mut key = HKEY::default();
+        unsafe { RegCreateKeyW(self.0, *name, &mut key).ok()? };
+        Ok(RegistryKeyGuard(key))
+    }
+    
+    fn get(&self) -> HKEY {
+        self.0
+    }
 }
 
 fn delete_registry_keys() -> Result<()> {
