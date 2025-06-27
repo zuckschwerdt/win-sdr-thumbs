@@ -1,4 +1,4 @@
-# Windows SVG Thumbnail Provider in Rust
+# Thio's SVG Thumbnail Extension for Windows Explorer
 
 A high-performance thumbnail provider for Windows that generates explorer thumbnails for `.svg` and `.svgz` files, written in Rust, with no third party dependencies.
 
