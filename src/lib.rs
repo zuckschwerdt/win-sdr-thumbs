@@ -104,6 +104,19 @@ impl Drop for DeviceContextGuard {
     }
 }
 
+// Lookup table for fast alpha un-premultiplication: (255 << 8) / alpha for each alpha value 1-255
+// This gives us 8 bits of fractional precision to maintain accuracy
+// Index 0 is unused since we handle alpha=0 as a special case
+static ALPHA_LUT: [u32; 256] = {
+    let mut lut = [0u32; 256];
+    let mut i = 1;
+    while i < 256 {
+        lut[i] = (255 << 8) / (i as u32);
+        i += 1;
+    }
+    lut
+};
+
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<HBITMAP> {
     // 1. Get resources
@@ -214,9 +227,12 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
                 // Pixel alpha is between 0 and 255, aka partially transparent. So we need to calculate the un-premultiplied color.
                 } else {
                     let (b, g, r) = (src_chunk[0], src_chunk[1], src_chunk[2]);
-                    dest_chunk[0] = ((b as u32 * 255) / a as u32) as u8;
-                    dest_chunk[1] = ((g as u32 * 255) / a as u32) as u8;
-                    dest_chunk[2] = ((r as u32 * 255) / a as u32) as u8;
+                    // Full calculation for un-premultiplication is (channel * 255) / alpha. If we wanted better rounding we could add a/2, but for little benefit and extra compute
+                    // Use the lookup table for the division part because it's faster and we need to repeat it for potentially many pixels
+                    let multiplier = ALPHA_LUT[a as usize];
+                    dest_chunk[0] = ((b as u32 * multiplier) >> 8) as u8;
+                    dest_chunk[1] = ((g as u32 * multiplier) >> 8) as u8;
+                    dest_chunk[2] = ((r as u32 * multiplier) >> 8) as u8;
                     dest_chunk[3] = a;
                 }
             }
