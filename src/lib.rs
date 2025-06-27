@@ -40,6 +40,51 @@ use windows::{
     },
 };
 
+// =================================================================
+//                  FFI Panic Safety Macro
+// =================================================================
+
+/// Macro to wrap FFI functions with panic protection.
+/// This eliminates the boilerplate code for catch_unwind and error handling.
+macro_rules! ffi_guard {
+    // For functions that return Result<T>
+    (Result<$ret_type:ty>, $body:expr) => {{
+        let result = catch_unwind(AssertUnwindSafe(|| $body));
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                //log_message("A PANIC occurred in FFI function.");
+                Err(E_FAIL.into())
+            }
+        }
+    }};
+    
+    // For functions that return HRESULT directly
+    (HRESULT, $body:expr) => {{
+        let result = catch_unwind(AssertUnwindSafe(|| $body));
+        match result {
+            Ok(hr) => hr,
+            Err(_) => {
+                //log_message("A PANIC occurred in FFI function.");
+                E_FAIL
+            }
+        }
+    }};
+    
+    // For functions that return BOOL
+    (BOOL, $body:expr) => {{
+        let result = catch_unwind(AssertUnwindSafe(|| $body));
+        match result {
+            Ok(success) => success.into(),
+            Err(_) => {
+                //log_message("A PANIC occurred in FFI function.");
+                false.into()
+            }
+        }
+    }};
+}
+
 // --- Thread-local storage for COM objects that cannot be shared between threads ---
 thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
@@ -308,58 +353,58 @@ impl Drop for ThumbnailProvider {
 impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
     fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
-        //log_message("Initialize: Entered.");
+        ffi_guard!(Result<()>, {
+            //log_message("Initialize: Entered.");
 
-        // Dereference the `Ref` to get the `Option`, then use `if let` to safely unwrap it.
-        // This is the correct pattern that satisfies all compiler errors.
-        if let Some(stream) = &*pstream {
-            //log_message("Initialize: Stream is valid. Proceeding to read.");
+            // Dereference the `Ref` to get the `Option`, then use `if let` to safely unwrap it.
+            // This is the correct pattern that satisfies all compiler errors.
+            if let Some(stream) = &*pstream {
+                //log_message("Initialize: Stream is valid. Proceeding to read.");
 
-            // Now that we have a valid `IStream`, cast it to the interface with the Read method.
-            let seq_stream: Com::ISequentialStream = stream.cast()?;
+                // Now that we have a valid `IStream`, cast it to the interface with the Read method.
+                let seq_stream: Com::ISequentialStream = stream.cast()?;
 
-            let mut buffer: Vec<u8> = Vec::new();
-            let mut chunk: Vec<u8>  = vec![0u8; 65536];
-            
-            loop {
-                let mut bytes_read: u32 = 0;
+                let mut buffer: Vec<u8> = Vec::new();
+                let mut chunk: Vec<u8>  = vec![0u8; 65536];
                 
-                let hr: HRESULT = unsafe {
-                    seq_stream.Read(
-                        chunk.as_mut_ptr() as *mut core::ffi::c_void,
-                        chunk.len() as u32,
-                        Some(&mut bytes_read)
-                    )
-                };
-                
-                if hr.is_err() || bytes_read == 0 {
-                    //log_message(&format!("Initialize: Finished reading stream. Total bytes read: {}.", buffer.len()));
-                    break;
+                loop {
+                    let mut bytes_read: u32 = 0;
+                    
+                    let hr: HRESULT = unsafe {
+                        seq_stream.Read(
+                            chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                            chunk.len() as u32,
+                            Some(&mut bytes_read)
+                        )
+                    };
+                    
+                    if hr.is_err() || bytes_read == 0 {
+                        //log_message(&format!("Initialize: Finished reading stream. Total bytes read: {}.", buffer.len()));
+                        break;
+                    }
+                    
+                    buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                 }
                 
-                buffer.extend_from_slice(&chunk[..bytes_read as usize]);
+                // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
+                let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+                *data_guard = Some(buffer);
+                
+                //log_message("Initialize: Succeeded.");
+                Ok(())
+            } else {
+                // This case handles if Windows passes a null pointer.
+                //log_message("Initialize: Error - Stream was null.");
+                Err(E_INVALIDARG.into())
             }
-            
-            // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
-            let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
-            *data_guard = Some(buffer);
-            
-            //log_message("Initialize: Succeeded.");
-            Ok(())
-        } else {
-            // This case handles if Windows passes a null pointer.
-            //log_message("Initialize: Error - Stream was null.");
-            Err(E_INVALIDARG.into())
-        }
+        })
     }
 }
 
 impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
     fn GetThumbnail(&self, cx: u32, phbmp: *mut Gdi::HBITMAP, pdwalpha: *mut Shell::WTS_ALPHATYPE) -> Result<()> {
-        // We wrap the entire function body in catch_unwind.
-        // This prevents a panic inside our Rust code from crossing the FFI boundary and crashing the host (DllHost.exe).
-        let result = catch_unwind(AssertUnwindSafe(|| {
+        ffi_guard!(Result<()>, {
             //log_message("GetThumbnail: Entered.");
 
             let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
@@ -390,21 +435,7 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                     Err(e)
                 }
             }
-        }));
-
-        // Now, we handle the result of the `catch_unwind`.
-        match result {
-            // Ok(Ok(())) means the closure ran without panicking and returned Ok.
-            Ok(Ok(())) => Ok(()),
-            // Ok(Err(e)) means the closure ran without panicking and returned an error. Propagate it.
-            Ok(Err(e)) => Err(e),
-            // Err(_) means the closure panicked.
-            Err(_) => {
-                //log_message("GetThumbnail: A PANIC occurred.");
-                // Return a generic failure HRESULT to COM. This prevents the crash.
-                Err(E_FAIL.into())
-            }
-        }
+        })
     }
 }
 
@@ -446,42 +477,46 @@ impl Drop for ClassFactory {
 impl Com::IClassFactory_Impl for ClassFactory_Impl {
     #[allow(non_snake_case)]
     fn CreateInstance(&self, punkouter: Ref<'_, IUnknown>, riid: *const GUID, ppvobject: *mut *mut std::ffi::c_void) -> Result<()> {
-        //log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
+        ffi_guard!(Result<()>, {
+            //log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
 
-        // Safety checks for null pointers
-        if riid.is_null() || ppvobject.is_null() {
-            return Err(Error::new(E_POINTER, "Null pointer passed to CreateInstance"));
-        }
+            // Safety checks for null pointers
+            if riid.is_null() || ppvobject.is_null() {
+                return Err(Error::new(E_POINTER, "Null pointer passed to CreateInstance"));
+            }
 
-        // We do not support aggregation.
-        if !punkouter.is_null() {
-            //log_message("ClassFactory::CreateInstance: Error - Aggregation not supported.");
-            return Err(Error::new(CLASS_E_NOAGGREGATION, "Aggregation not supported"));
-        }
-        
-        // Create an instance of our ThumbnailProvider
-        let thumbnail_provider: IUnknown = ThumbnailProvider::default().into();
-        
-        // Query for the interface requested by the caller and return it.
-        let hr: HRESULT = unsafe { thumbnail_provider.query(&*riid, ppvobject) };
+            // We do not support aggregation.
+            if !punkouter.is_null() {
+                //log_message("ClassFactory::CreateInstance: Error - Aggregation not supported.");
+                return Err(Error::new(CLASS_E_NOAGGREGATION, "Aggregation not supported"));
+            }
+            
+            // Create an instance of our ThumbnailProvider
+            let thumbnail_provider: IUnknown = ThumbnailProvider::default().into();
+            
+            // Query for the interface requested by the caller and return it.
+            let hr: HRESULT = unsafe { thumbnail_provider.query(&*riid, ppvobject) };
 
-        //log_message(&format!("ClassFactory::CreateInstance: Exiting with HRESULT: {:?}", hr));
-        
-        if hr.is_ok() {
-            Ok(())
-        } else {
-            Err(Error::new(hr, "Failed to query interface"))
-        }
+            //log_message(&format!("ClassFactory::CreateInstance: Exiting with HRESULT: {:?}", hr));
+            
+            if hr.is_ok() {
+                Ok(())
+            } else {
+                Err(Error::new(hr, "Failed to query interface"))
+            }
+        })
     }
 
     #[allow(non_snake_case)]
     fn LockServer(&self, flock: BOOL) -> Result<()> {
-        if flock.as_bool() {
-            dll_add_ref();
-        } else {
-            dll_release();
-        }
-        Ok(())
+        ffi_guard!(Result<()>, {
+            if flock.as_bool() {
+                dll_add_ref();
+            } else {
+                dll_release();
+            }
+            Ok(())
+        })
     }
 }
 
@@ -508,50 +543,56 @@ const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0x95724385_3234_4ea4_
 #[no_mangle]
 #[allow(non_snake_case)]
 extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *const std::ffi::c_void) -> BOOL {
-    if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
-        //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
-        MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Release);
-    }
-    true.into()
+    ffi_guard!(BOOL, {
+        if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
+            //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
+            MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Release);
+        }
+        true
+    })
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut std::ffi::c_void) -> HRESULT {
-    // Safety checks for null pointers
-    if rclsid.is_null() || riid.is_null() || ppv.is_null() {
-        return E_POINTER;
-    }
+    ffi_guard!(HRESULT, {
+        // Safety checks for null pointers
+        if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+            return E_POINTER;
+        }
 
-    // Check if the caller is asking for our specific class.
-    if unsafe { *rclsid } != CLSID_SVG_THUMBNAIL_PROVIDER {
-        //log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
-        return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    
-    // Create our class factory.
-    let factory: Com::IClassFactory = ClassFactory::default().into();
-    
-    // Query for the interface the caller wants (usually IClassFactory) and return it.
-    let hr: HRESULT = unsafe { factory.query(riid, ppv) };
-    
-    // This is important! The factory is created with a ref count of 1. `query` increments it to 2.
-    // We must release our original reference so that only the caller holds a reference.
-    std::mem::forget(factory);
+        // Check if the caller is asking for our specific class.
+        if unsafe { *rclsid } != CLSID_SVG_THUMBNAIL_PROVIDER {
+            //log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        
+        // Create our class factory.
+        let factory: Com::IClassFactory = ClassFactory::default().into();
+        
+        // Query for the interface the caller wants (usually IClassFactory) and return it.
+        let hr: HRESULT = unsafe { factory.query(riid, ppv) };
+        
+        // This is important! The factory is created with a ref count of 1. `query` increments it to 2.
+        // We must release our original reference so that only the caller holds a reference.
+        std::mem::forget(factory);
 
-    //log_message(&format!("DllGetClassObject: Exiting with HRESULT: {:?}", hr));
-    
-    hr
+        //log_message(&format!("DllGetClassObject: Exiting with HRESULT: {:?}", hr));
+        
+        hr
+    })
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if DLL_REFERENCES.load(Ordering::Relaxed) == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
+    ffi_guard!(HRESULT, {
+        if DLL_REFERENCES.load(Ordering::Relaxed) == 0 {
+            S_OK
+        } else {
+            S_FALSE
+        }
+    })
 }
 
 
@@ -674,17 +715,21 @@ fn delete_registry_keys() -> Result<()> {
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
-    match create_registry_keys() {
-        Ok(_) => S_OK,
-        Err(_) => E_FAIL,
-    }
+    ffi_guard!(HRESULT, {
+        match create_registry_keys() {
+            Ok(_) => S_OK,
+            Err(_) => E_FAIL,
+        }
+    })
 }
 
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn DllUnregisterServer() -> HRESULT {
-    match delete_registry_keys() {
-        Ok(_) => S_OK,
-        Err(_) => E_FAIL,
-    }
+    ffi_guard!(HRESULT, {
+        match delete_registry_keys() {
+            Ok(_) => S_OK,
+            Err(_) => E_FAIL,
+        }
+    })
 }
