@@ -43,7 +43,14 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
         let mut factory_ref = factory.borrow_mut();
         if factory_ref.is_none() {
             // CoInitialize must be called on the thread before using COM.
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+                // S_FALSE means COM was already initialized, which is fine
+                // S_OK means we successfully initialized COM
+                // Any other result is a real error we should propagate
+            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if hr != S_OK && hr != S_FALSE {
+                return Err(Error::new(hr, "Failed to initialize COM"));
+            }
+            
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
             };
@@ -249,8 +256,9 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     }
 
     // 9. Unmap the staging bitmap and release resources
+    // Note: We ignore unmapping errors since the bitmap data has already been successfully copied
     unsafe {
-        staging_bitmap.Unmap()?;
+        let _ = staging_bitmap.Unmap();
     }
 
     Ok(hbitmap)
@@ -542,7 +550,7 @@ fn create_registry_keys() -> Result<()> {
         RegCreateKeyW(key, PCWSTR(clsid_wide.as_ptr()), &mut clsid_key).ok()?;
         let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
         RegSetValueExW(clsid_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2))).ok()?;
-        RegCloseKey(key).ok()?;
+        let _ = RegCloseKey(key);
 
         // Create CLSID\{our-clsid}\InprocServer32
         let mut inproc_key = HKEY::default();
@@ -551,21 +559,21 @@ fn create_registry_keys() -> Result<()> {
         RegSetValueExW(inproc_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
         let model_value = to_pcwstr("Apartment");
         RegSetValueExW(inproc_key, w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
-        RegCloseKey(inproc_key).ok()?;
-        RegCloseKey(clsid_key).ok()?;
+        let _ = RegCloseKey(inproc_key);
+        let _ = RegCloseKey(clsid_key);
 
         // Associate with .svg files
         let mut svg_key = HKEY::default();
         RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut svg_key).ok()?;
         let clsid_value = to_pcwstr(&clsid_string);
         RegSetValueExW(svg_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
-        RegCloseKey(svg_key).ok()?;
+        let _ = RegCloseKey(svg_key);
 
         // Associate with .svgz files
         let mut svgz_key = HKEY::default();
         RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut svgz_key).ok()?;
         RegSetValueExW(svgz_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
-        RegCloseKey(svgz_key).ok()?;
+        let _ = RegCloseKey(svgz_key);
 
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
     }
