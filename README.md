@@ -68,14 +68,15 @@ When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with thi
     * The Direct2D API turns the SVG data into a `SvgDocument` object. The `viewport` attribute is set to the thumbnail size requested by Explorer.
     * The `width` and `height` attributes are removed from the root `<svg>` element before drawing, which I discovered causes the `DrawSvgDocument` method to autoscale the image to the viewport, avoiding the need to do any manual scaling to fill the thumbnail.
     * The `SvgDocument` is then drawn onto the render target bitmap.
+    * The `unpremultiply` effect is then applied to the bitmap, because the standard Windows GDI requires straight alpha.
+      * The un-premultiplication step is necessary for displaying transparency correctly and prevents dark edges from appearing on the final thumbnail.
 3.  **Pixel Data Transfer**:
     * The rendered image is copied from the GPU render target to a "staging" bitmap on the CPU, which allows the program to access the raw pixel data.
-    * This data is in a 32-bit BGRA format with **premultiplied alpha**.
+    * This data is in a 32-bit BGRA format with **straight alpha** (after the unpremultiply effect).
+    * Note: Although the staging bitmap is declared to Direct2D as having premultiplied alpha format (required for proper bitmap operations), the actual pixel values contain straight alpha data due to the unpremultiply effect. Direct2D normally only works with premultiplied alpha, but this doesn't matter at this point since we're just copying the data out to GDI.
 4.  **Creating the Final Thumbnail**:
     * A standard Windows GDI `HBITMAP` is created, which is the final format Explorer needs for the thumbnail.
     * The pixel data is copied from the staging bitmap to the final `HBITMAP`.
-       * The GDI requires straight-alpha (as opposed to pre-multiplied), so during this process, the alpha is **un-premultiplied**.
-       * The un-premultiplication step is necessary for displaying transparency correctly and prevents dark edges from appearing on the final thumbnail.
 5.  **Safety**: The entire thumbnail generation process is wrapped in a panic handler (`catch_unwind`). This ensures that if any unexpected error occurs during rendering, it will not crash the host application (e.g., `explorer.exe`).
 
 ## How to Compile it Yourself
