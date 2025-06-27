@@ -11,9 +11,10 @@ A high-performance thumbnail provider for Windows that generates explorer thumbn
 
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
 2.  Download the latest `win_svg_thumbs.dll` file. Put it somewhere it can remain.
-3.  Open a Command Prompt with administrator privileges.
-4.  Navigate to the directory where you saved the `.dll` file.
-5.  Run the following command to register the DLL:
+3.  Open a Command Prompt with **administrator privileges**.
+     - (Administrator is required or you will get error `0x80004005` for lack of permission)
+5.  Navigate to the directory where you saved the `.dll` file.
+6.  Run the following command to register the DLL:
     ```
     regsvr32 win_svg_thumbs.dll
     ```
