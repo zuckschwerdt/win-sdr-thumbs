@@ -1,37 +1,49 @@
-use std::cell::RefCell;
-use std::ffi::OsStr;
-// use std::fs::OpenOptions;
-// use std::io::Write;
-use std::os::windows::prelude::OsStrExt;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{atomic::{AtomicPtr, AtomicU32, Ordering}, Mutex};
-use windows::Win32::System::Com::ISequentialStream;
+use std::{
+    cell::RefCell,
+    ffi::OsStr,
+    // fs::OpenOptions,
+    // io::Write,
+    os::windows::prelude::OsStrExt,
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::{
+        atomic::{
+            AtomicPtr, 
+            AtomicU32, 
+            Ordering
+        }, 
+        Mutex
+    },
+};
+
 use windows::{
     core::*,
-    Win32::UI::Shell::{IThumbnailProvider, WTSAT_ARGB, WTS_ALPHATYPE},
-    Win32::UI::Shell::PropertiesSystem::{IInitializeWithStream, IInitializeWithStream_Impl},
-
     Win32::{
         Foundation::*,
         Graphics::{
-            Direct2D::{Common::*, *, CLSID_D2D1UnPremultiply},
-            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-            Direct3D11::*,
-            Dxgi::{Common::*, *},
-            Gdi::*,
-            Imaging::*,
+            Direct2D::{
+                *, 
+                self, 
+                Common::*
+            },
+            Direct3D,
+            Direct3D11,
+            Dxgi,
+            Gdi,
+            Imaging,
         },
-        System::{Com::*, LibraryLoader::*, Registry::*, SystemServices::*},
-        UI::{
-            Shell::*,
+        System::{
+            self,
+            Com,
+            Registry::*
         },
+        UI::Shell
     },
 };
 
 // --- Thread-local storage for COM objects that cannot be shared between threads ---
 thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
-    static WIC_FACTORY: RefCell<Option<IWICImagingFactory>> = RefCell::new(None);
+    static WIC_FACTORY: RefCell<Option<Imaging::IWICImagingFactory>> = RefCell::new(None);
     static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
     static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
 }
@@ -46,7 +58,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
                 // S_FALSE means COM was already initialized, which is fine
                 // S_OK means we successfully initialized COM
                 // Any other result is a real error we should propagate
-            let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let hr = unsafe { Com::CoInitializeEx(None, Com::COINIT_APARTMENTTHREADED) };
             if hr != S_OK && hr != S_FALSE {
                 return Err(Error::new(hr, "Failed to initialize COM"));
             }
@@ -65,21 +77,21 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
         let mut device_ref = device.borrow_mut();
         if device_ref.is_none() {
             // 1. Create the D3D11 Device
-            let mut d3d_device: Option<ID3D11Device> = None;
+            let mut d3d_device: Option<Direct3D11::ID3D11Device> = None;
             unsafe {
-                D3D11CreateDevice(
+                Direct3D11::D3D11CreateDevice(
                     None,
-                    D3D_DRIVER_TYPE_HARDWARE,
+                    Direct3D::D3D_DRIVER_TYPE_HARDWARE,
                     HMODULE::default(),
-                    D3D11_CREATE_DEVICE_BGRA_SUPPORT, // Required for D2D interop
+                    Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, // Required for D2D interop
                     None,
-                    D3D11_SDK_VERSION,
+                    Direct3D11::D3D11_SDK_VERSION,
                     Some(&mut d3d_device),
                     None,
                     None,
                 )?;
             }
-            let dxgi_device: IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
+            let dxgi_device: Dxgi::IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
 
             // 2. Create the D2D Device from the D3D11 device
             let d2d_dev = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
@@ -103,17 +115,17 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
 }
 
 // A simple struct to manage the HDC lifetime
-struct DeviceContextGuard(HDC);
+struct DeviceContextGuard(Gdi::HDC);
 
 impl Drop for DeviceContextGuard {
     fn drop(&mut self) {
         // This is guaranteed to be called when the guard goes out of scope
-        unsafe { ReleaseDC(None, self.0) };
+        unsafe { Gdi::ReleaseDC(None, self.0) };
     }
 }
 
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
-pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<HBITMAP> {
+pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<Gdi::HBITMAP> {
     // Early validation - avoid work for invalid sizes
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
@@ -124,7 +136,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
     // 2. Create the D2D RENDER TARGET bitmap (GPU-only)
     let bitmap_props_rt = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: 96.0,
         dpiY: 96.0,
         bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
@@ -139,7 +151,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
 
     // Load svg data into a memory stream as the input for the SVG document
-    let stream: IStream = unsafe { SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
+    let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
 
     // Create the SVG document from the stream of SVG data
     let svg_doc = unsafe { d2d_context.CreateSvgDocument(
@@ -163,7 +175,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
     
     // Apply UnPremultiply effect
-    let final_bitmap = match unsafe { d2d_context.CreateEffect(&CLSID_D2D1UnPremultiply) } {
+    let final_bitmap = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
         Ok(unpremultiply_effect) => {
             // Create a second render target bitmap for the UnPremultiply effect output
             let output_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
@@ -202,7 +214,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
     // 4. Create the CPU-readable STAGING bitmap
     let bitmap_props_staging = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
         dpiX: 96.0,
         dpiY: 96.0,
         bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
@@ -220,17 +232,17 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
     // 7. Create the final GDI HBITMAP
     // This creates a separate GDI bitmap with its own memory buffer
-    let bmi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER {
-        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
-        biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0 as u32, ..Default::default()
+    let bmi = Gdi::BITMAPINFO { bmiHeader: Gdi::BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
+        biPlanes: 1, biBitCount: 32, biCompression: Gdi::BI_RGB.0 as u32, ..Default::default()
     }, ..Default::default() };
 
     // Automatically release the HDC when it goes out of scope
-    let hdc_guard = DeviceContextGuard(unsafe { GetDC(None) });
+    let hdc_guard = DeviceContextGuard(unsafe { Gdi::GetDC(None) });
     let hdc = hdc_guard.0; // Use the raw handle
 
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
+    let hbitmap = unsafe { Gdi::CreateDIBSection(Some(hdc), &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
     // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
@@ -270,7 +282,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 //                 COM Thumbnail Provider Object
 // =================================================================
 
-#[implement(IInitializeWithStream, IThumbnailProvider)]
+#[implement(Shell::PropertiesSystem::IInitializeWithStream, Shell::IThumbnailProvider)]
 struct ThumbnailProvider {
     svg_data: Mutex<Option<Vec<u8>>>,
 }
@@ -290,9 +302,9 @@ impl Drop for ThumbnailProvider {
     }
 }
 
-impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
+impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
-    fn Initialize(&self, pstream: Ref<'_, IStream>, _grfmode: u32) -> Result<()> {
+    fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
         //log_message("Initialize: Entered.");
 
         // Dereference the `Ref` to get the `Option`, then use `if let` to safely unwrap it.
@@ -301,7 +313,7 @@ impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
             //log_message("Initialize: Stream is valid. Proceeding to read.");
 
             // Now that we have a valid `IStream`, cast it to the interface with the Read method.
-            let seq_stream: ISequentialStream = stream.cast()?;
+            let seq_stream: Com::ISequentialStream = stream.cast()?;
 
             let mut buffer = Vec::new();
             let mut chunk = vec![0u8; 65536];
@@ -339,9 +351,9 @@ impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
     }
 }
 
-impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
+impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
-    fn GetThumbnail(&self, cx: u32, phbmp: *mut HBITMAP, pdwalpha: *mut WTS_ALPHATYPE) -> Result<()> {
+    fn GetThumbnail(&self, cx: u32, phbmp: *mut Gdi::HBITMAP, pdwalpha: *mut Shell::WTS_ALPHATYPE) -> Result<()> {
         // We wrap the entire function body in catch_unwind.
         // This prevents a panic inside our Rust code from crossing the FFI boundary and crashing the host (DllHost.exe).
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -365,7 +377,7 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                     //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
                     unsafe {
                         *phbmp = hbitmap;
-                        *pdwalpha = WTSAT_ARGB;
+                        *pdwalpha = Shell::WTSAT_ARGB;
                     }
                     //log_message("GetThumbnail: Succeeded.");
                     Ok(())
@@ -412,7 +424,7 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 //                      COM Class Factory
 // =================================================================
 
-#[implement(IClassFactory)]
+#[implement(Com::IClassFactory)]
 struct ClassFactory;
 
 impl Default for ClassFactory {
@@ -428,7 +440,7 @@ impl Drop for ClassFactory {
     }
 }
 
-impl IClassFactory_Impl for ClassFactory_Impl {
+impl Com::IClassFactory_Impl for ClassFactory_Impl {
     #[allow(non_snake_case)]
     fn CreateInstance(&self, punkouter: Ref<'_, IUnknown>, riid: *const GUID, ppvobject: *mut *mut std::ffi::c_void) -> Result<()> {
         //log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
@@ -488,7 +500,7 @@ const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0x95724385_3234_4ea4_
 #[no_mangle]
 #[allow(non_snake_case)]
 extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *const std::ffi::c_void) -> BOOL {
-    if fdw_reason == DLL_PROCESS_ATTACH {
+    if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
         //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
         MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Relaxed);
     }
@@ -505,7 +517,7 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
     }
     
     // Create our class factory.
-    let factory: IClassFactory = ClassFactory::default().into();
+    let factory: Com::IClassFactory = ClassFactory::default().into();
     
     // Query for the interface the caller wants (usually IClassFactory) and return it.
     let hr = unsafe { factory.query(riid, ppv) };
@@ -579,7 +591,7 @@ fn create_registry_keys() -> Result<()> {
         RegSetValueExW(svgz_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
         let _ = RegCloseKey(svgz_key);
 
-        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+        Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None);
     }
 
     Ok(())
@@ -589,7 +601,7 @@ fn get_dll_path() -> String {
     let handle_ptr = MODULE_HANDLE.load(Ordering::Relaxed);
     let handle = HMODULE(handle_ptr);
     let mut path = vec![0u16; MAX_PATH as usize];
-    let len = unsafe { GetModuleFileNameW(Some(handle), &mut path) };
+    let len = unsafe { System::LibraryLoader::GetModuleFileNameW(Some(handle), &mut path) };
     String::from_utf16_lossy(&path[..len as usize])
 }
 
@@ -604,7 +616,7 @@ fn delete_registry_keys() -> Result<()> {
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
 
-        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+        Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None)
     }
 
     Ok(())
