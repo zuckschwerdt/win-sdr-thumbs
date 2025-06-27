@@ -14,7 +14,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::{
-            Direct2D::{Common::*, *},
+            Direct2D::{Common::*, *, CLSID_D2D1UnPremultiply},
             Direct3D::D3D_DRIVER_TYPE_HARDWARE,
             Direct3D11::*,
             Dxgi::{Common::*, *},
@@ -112,19 +112,6 @@ impl Drop for DeviceContextGuard {
     }
 }
 
-// Lookup table for fast alpha un-premultiplication: (255 << 8) / alpha for each alpha value 1-255
-// This gives us 8 bits of fractional precision to maintain accuracy
-// Index 0 is unused since we handle alpha=0 as a special case
-static ALPHA_LUT: [u32; 256] = {
-    let mut lut = [0u32; 256];
-    let mut i = 1;
-    while i < 256 {
-        lut[i] = (255 << 8) / (i as u32);
-        i += 1;
-    }
-    lut
-};
-
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<HBITMAP> {
     // Early validation - avoid work for invalid sizes
@@ -145,8 +132,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     };
     let render_target_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt)? };
 
-    // 3. Set target and draw the SVG
-    unsafe {
+    // 3. Set target and draw the SVG, then apply UnPremultiply effect
+    let final_bitmap = unsafe {
         d2d_context.SetTarget(&render_target_bitmap);
         d2d_context.BeginDraw();
         // Clear to transparent black
@@ -177,9 +164,46 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         }
         
         d2d_context.DrawSvgDocument(&svg_doc);
-        d2d_context.EndDraw(None, None)?;
-        d2d_context.SetTarget(None);
-    }
+        
+        // Apply UnPremultiply effect
+        match d2d_context.CreateEffect(&CLSID_D2D1UnPremultiply) {
+            Ok(unpremultiply_effect) => {
+                // Create a second render target bitmap for the UnPremultiply effect output
+                let output_bitmap = d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt)?;
+                
+                // Switch to the output bitmap as the target
+                d2d_context.SetTarget(&output_bitmap);
+                
+                // SetInput doesn't return a Result, it's a void method
+                unpremultiply_effect.SetInput(0, &render_target_bitmap, true);
+                
+                match unpremultiply_effect.cast::<ID2D1Image>() {
+                    Ok(effect_image) => {
+                        // DrawImage doesn't return a Result either
+                        d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
+                        
+                        d2d_context.EndDraw(None, None)?;
+                        d2d_context.SetTarget(None);
+                        
+                        // Return the output bitmap as our final result
+                        Ok::<_, windows::core::Error>(output_bitmap)
+                    }
+                    Err(_) => {
+                        d2d_context.EndDraw(None, None)?;
+                        d2d_context.SetTarget(None);
+                        // Fall back to original bitmap
+                        Ok::<_, windows::core::Error>(render_target_bitmap)
+                    }
+                }
+            }
+            Err(_) => {
+                d2d_context.EndDraw(None, None)?;
+                d2d_context.SetTarget(None);
+                // Fall back to original bitmap
+                Ok::<_, windows::core::Error>(render_target_bitmap)
+            }
+        }
+    }?;
 
     // 4. Create the CPU-readable STAGING bitmap
     let bitmap_props_staging = D2D1_BITMAP_PROPERTIES1 {
@@ -191,13 +215,16 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     };
     let staging_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging)? };
 
-    // 5. Copy from render target to staging bitmap (GPU -> CPU)
-    unsafe { staging_bitmap.CopyFromBitmap(None, &render_target_bitmap, None)? };
+    // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
+    // This copies the pixel data but it's still in D2D's memory space
+    unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None)? };
 
     // 6. Map the staging bitmap to get a pointer to the pixel data
+    // This gives us a CPU-readable pointer to the D2D staging bitmap's memory
     let mapped_rect = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ)? };
 
     // 7. Create the final GDI HBITMAP
+    // This creates a separate GDI bitmap with its own memory buffer
     let bmi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER {
         biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
         biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0 as u32, ..Default::default()
@@ -210,47 +237,26 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0)? };
 
-    // 8. Copy and convert pixels from the mapped buffer to the final HBITMAP (OPTIMIZED)
+    // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
+    // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
     if !dib_data.is_null() {
-        let source_pixels_slice = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
-        let dest_pixels = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
-        let dest_stride_usize = (width * 4) as usize;
-        let source_stride_usize = mapped_rect.pitch as usize;
-
-        // Optimized pixel conversion - process multiple pixels at once and reduce branching
-        for y in 0..height as usize {
-            let src_row_start = y * source_stride_usize;
-            let dest_row_start = y * dest_stride_usize;
-            let src_row = &source_pixels_slice[src_row_start .. src_row_start + dest_stride_usize];
-            let dest_row = &mut dest_pixels[dest_row_start .. dest_row_start + dest_stride_usize];
-
-            // Process 4 pixels at a time using u32 operations for better performance
-            let src_pixels = unsafe { std::slice::from_raw_parts(src_row.as_ptr() as *const u32, width as usize) };
-            let dest_pixels = unsafe { std::slice::from_raw_parts_mut(dest_row.as_mut_ptr() as *mut u32, width as usize) };
-
-            for (dest_pixel, &src_pixel) in dest_pixels.iter_mut().zip(src_pixels.iter()) {
-                let src_bytes = src_pixel.to_le_bytes();
-                let a = src_bytes[3];
-
-                // Un-premultiply the color channels based on the alpha value. We'll include fast paths for fully opaque and fully transparent pixels, since an SVG is likely to be mostly made of those.
-                // Fast paths for common alpha values
-                if a == 255 {
-                    // Fully opaque - direct copy
-                    *dest_pixel = src_pixel;
-                } else if a == 0 {
-                    // Fully transparent - zero out
-                    *dest_pixel = 0;
-                } else {
-                    // Partial transparency - un-premultiply using lookup table
-                    // Full calculation for un-premultiplication is (channel * 255) / alpha. If we wanted better rounding we could add a/2, but for little benefit and extra compute
-                    // Use the lookup table for the division part because it's faster and we need to repeat it for potentially many pixels
-                    let (b, g, r) = (src_bytes[0], src_bytes[1], src_bytes[2]);
-                    let multiplier = ALPHA_LUT[a as usize];
-                    let new_b = ((b as u32 * multiplier) >> 8) as u8;
-                    let new_g = ((g as u32 * multiplier) >> 8) as u8;
-                    let new_r = ((r as u32 * multiplier) >> 8) as u8;
-                    *dest_pixel = u32::from_le_bytes([new_b, new_g, new_r, a]);
-                }
+        let source_data = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
+        let dest_data = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
+        
+        // Since the UnPremultiply effect already handled the alpha conversion, we can do a simple memory copy if the stride matches
+        if mapped_rect.pitch == (width * 4) {
+            // Direct copy - no stride mismatch
+            dest_data.copy_from_slice(&source_data[..dest_data.len()]);
+        } else {
+            // Copy row by row to handle stride differences
+            let dest_stride = (width * 4) as usize;
+            let source_stride = mapped_rect.pitch as usize;
+            
+            for y in 0..height as usize {
+                let src_start = y * source_stride;
+                let dest_start = y * dest_stride;
+                dest_data[dest_start..dest_start + dest_stride]
+                    .copy_from_slice(&source_data[src_start..src_start + dest_stride]);
             }
         }
     }
@@ -392,7 +398,7 @@ impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 }
 
 // -------------- Logger ----------------
-// fn //log_message(message: &str) {
+// fn log_message(message: &str) {
 //     if let Ok(mut file) = OpenOptions::new()
 //         .create(true)
 //         .append(true)
