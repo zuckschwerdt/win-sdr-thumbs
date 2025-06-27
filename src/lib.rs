@@ -114,15 +114,6 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
     Ok((d2d_factory, d2d_device, d2d_context))
 }
 
-// RAII guards for automatic resource cleanup
-struct DeviceContextGuard(Gdi::HDC);
-
-impl Drop for DeviceContextGuard {
-    fn drop(&mut self) {
-        unsafe { Gdi::ReleaseDC(None, self.0) };
-    }
-}
-
 // RAII wrapper for D2D bitmap mapping - automatically unmaps when dropped
 struct BitmapMapGuard<'a> {
     bitmap: &'a ID2D1Bitmap1,
@@ -256,12 +247,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         biPlanes: 1, biBitCount: 32, biCompression: Gdi::BI_RGB.0 as u32, ..Default::default()
     }, ..Default::default() };
 
-    // Automatically release the HDC when it goes out of scope
-    let hdc_guard: DeviceContextGuard = DeviceContextGuard(unsafe { Gdi::GetDC(None) });
-    let hdc: Gdi::HDC = hdc_guard.0;
-
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(Some(hdc), &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
+    let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
     // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
