@@ -33,27 +33,17 @@ thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
     static WIC_FACTORY: RefCell<Option<IWICImagingFactory>> = RefCell::new(None);
     static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
+    static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
 }
 /// Initializes and retrieves the thread-local Direct2D and WIC resources.
 /// This function ensures that the heavyweight factory and device objects are created only once per thread.
-fn get_d2d_resources() -> Result<(ID2D1Factory1, IWICImagingFactory, ID2D1Device)> {
-    // Get or create the WIC Factory.
-    let wic_factory = WIC_FACTORY.with(|factory| -> Result<IWICImagingFactory> {
-        let mut factory_ref = factory.borrow_mut();
-        if factory_ref.is_none() {
-            // CoInitialize must be called on the thread before using COM.
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
-            let wic: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
-            *factory_ref = Some(wic);
-        }
-        // This clone is cheap - it's just incrementing a reference counter.
-        Ok(factory_ref.as_ref().unwrap().clone())
-    })?;
-
+fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext5)> {
     // Get or create the Direct2D Factory.
     let d2d_factory = D2D_FACTORY.with(|factory| -> Result<ID2D1Factory1> {
         let mut factory_ref = factory.borrow_mut();
         if factory_ref.is_none() {
+            // CoInitialize must be called on the thread before using COM.
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
             };
@@ -91,7 +81,18 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, IWICImagingFactory, ID2D1Device
         Ok(device_ref.as_ref().unwrap().clone())
     })?;
 
-    Ok((d2d_factory, wic_factory, d2d_device))
+    // Get or create the Direct2D Device Context (expensive, so cache it)
+    let d2d_context = D2D_CONTEXT.with(|context| -> Result<ID2D1DeviceContext5> {
+        let mut context_ref = context.borrow_mut();
+        if context_ref.is_none() {
+            let dc = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
+            let dc5: ID2D1DeviceContext5 = dc.cast()?;
+            *context_ref = Some(dc5);
+        }
+        Ok(context_ref.as_ref().unwrap().clone())
+    })?;
+
+    Ok((d2d_factory, d2d_device, d2d_context))
 }
 
 // A simple struct to manage the HDC lifetime
@@ -119,12 +120,13 @@ static ALPHA_LUT: [u32; 256] = {
 
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<HBITMAP> {
-    // 1. Get resources
-    let (_d2d_factory, _wic_factory, d2d_device) = get_d2d_resources()?;
-    let d2d_context: ID2D1DeviceContext5 = {
-        let dc = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
-        dc.cast()?
-    };
+    // Early validation - avoid work for invalid sizes
+    if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
+    }
+
+    // 1. Get resources (now includes cached device context)
+    let (_d2d_factory, _d2d_device, d2d_context) = get_d2d_resources()?;
 
     // 2. Create the D2D RENDER TARGET bitmap (GPU-only)
     let bitmap_props_rt = D2D1_BITMAP_PROPERTIES1 {
@@ -201,39 +203,46 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
     let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0)? };
 
-    // 8. Copy and convert pixels from the mapped buffer to the final HBITMAP
+    // 8. Copy and convert pixels from the mapped buffer to the final HBITMAP (OPTIMIZED)
     if !dib_data.is_null() {
         let source_pixels_slice = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
         let dest_pixels = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
         let dest_stride_usize = (width * 4) as usize;
         let source_stride_usize = mapped_rect.pitch as usize;
 
+        // Optimized pixel conversion - process multiple pixels at once and reduce branching
         for y in 0..height as usize {
             let src_row_start = y * source_stride_usize;
             let dest_row_start = y * dest_stride_usize;
             let src_row = &source_pixels_slice[src_row_start .. src_row_start + dest_stride_usize];
             let dest_row = &mut dest_pixels[dest_row_start .. dest_row_start + dest_stride_usize];
 
-            for (dest_chunk, src_chunk) in dest_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
-                let a = src_chunk[3];
-                
+            // Process 4 pixels at a time using u32 operations for better performance
+            let src_pixels = unsafe { std::slice::from_raw_parts(src_row.as_ptr() as *const u32, width as usize) };
+            let dest_pixels = unsafe { std::slice::from_raw_parts_mut(dest_row.as_mut_ptr() as *mut u32, width as usize) };
+
+            for (dest_pixel, &src_pixel) in dest_pixels.iter_mut().zip(src_pixels.iter()) {
+                let src_bytes = src_pixel.to_le_bytes();
+                let a = src_bytes[3];
+
                 // Un-premultiply the color channels based on the alpha value. We'll include fast paths for fully opaque and fully transparent pixels, since an SVG is likely to be mostly made of those.
-                // Fast Path 1: Pixel is fully opaque. Just copy it directly.
+                // Fast paths for common alpha values
                 if a == 255 {
-                    dest_chunk.copy_from_slice(src_chunk);
-                // Fast Path 2: Pixel is fully transparent.
+                    // Fully opaque - direct copy
+                    *dest_pixel = src_pixel;
                 } else if a == 0 {
-                    dest_chunk.copy_from_slice(&[0, 0, 0, 0]);
-                // Pixel alpha is between 0 and 255, aka partially transparent. So we need to calculate the un-premultiplied color.
+                    // Fully transparent - zero out
+                    *dest_pixel = 0;
                 } else {
-                    let (b, g, r) = (src_chunk[0], src_chunk[1], src_chunk[2]);
+                    // Partial transparency - un-premultiply using lookup table
                     // Full calculation for un-premultiplication is (channel * 255) / alpha. If we wanted better rounding we could add a/2, but for little benefit and extra compute
                     // Use the lookup table for the division part because it's faster and we need to repeat it for potentially many pixels
+                    let (b, g, r) = (src_bytes[0], src_bytes[1], src_bytes[2]);
                     let multiplier = ALPHA_LUT[a as usize];
-                    dest_chunk[0] = ((b as u32 * multiplier) >> 8) as u8;
-                    dest_chunk[1] = ((g as u32 * multiplier) >> 8) as u8;
-                    dest_chunk[2] = ((r as u32 * multiplier) >> 8) as u8;
-                    dest_chunk[3] = a;
+                    let new_b = ((b as u32 * multiplier) >> 8) as u8;
+                    let new_g = ((g as u32 * multiplier) >> 8) as u8;
+                    let new_r = ((r as u32 * multiplier) >> 8) as u8;
+                    *dest_pixel = u32::from_le_bytes([new_b, new_g, new_r, a]);
                 }
             }
         }
@@ -285,7 +294,7 @@ impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
             let seq_stream: ISequentialStream = stream.cast()?;
 
             let mut buffer = Vec::new();
-            let mut chunk = vec![0u8; 4096];
+            let mut chunk = vec![0u8; 65536];
             
             loop {
                 let mut bytes_read = 0;
