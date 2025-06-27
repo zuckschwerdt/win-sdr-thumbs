@@ -2,4 +2,7 @@
 .vscode/
 *.code-workspace
 
+# My Ignores
+*.bak
+
 /target

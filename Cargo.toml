@@ -3,6 +3,10 @@ name = "svg-thumbnails-rust"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+# Include debug symbols
+debug = true
+
 [lib]
 crate-type = ["cdylib"]
 
