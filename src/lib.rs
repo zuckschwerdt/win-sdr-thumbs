@@ -119,11 +119,31 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         // Clear to transparent black
         d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
 
-        // Load and draw the SVG document
+        // Load svg data into a memory stream as the input for the SVG document
         let stream: IStream = SHCreateMemStream(Some(svg_data)).ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
-        let svg_doc = d2d_context.CreateSvgDocument(&stream, D2D_SIZE_F { width: width as f32, height: height as f32 })?;
-        d2d_context.DrawSvgDocument(&svg_doc);
 
+        // Create the SVG document from the stream of SVG data
+        let svg_doc = d2d_context.CreateSvgDocument(
+            &stream,
+            D2D_SIZE_F { 
+                width: width as f32, 
+                height: height as f32
+            }
+        )?;
+
+        // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
+        let root_element = svg_doc.GetRoot()?;
+        
+        // Apparently if there are no width and height attributes, CreateSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+        // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+        let _ = root_element.RemoveAttribute(
+            w!("height")
+        );
+        let _ = root_element.RemoveAttribute(
+            w!("width")
+        );
+
+        d2d_context.DrawSvgDocument(&svg_doc);
         d2d_context.EndDraw(None, None)?;
         d2d_context.SetTarget(None);
     }
