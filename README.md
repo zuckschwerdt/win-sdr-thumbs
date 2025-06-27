@@ -1,6 +1,35 @@
 # Windows SVG Thumbnail Provider in Rust
 
-A high-performance thumbnail provider for Windows that generates explorer thumbnails for `.svg` and `.svgz` files, written in Rust.
+A high-performance thumbnail provider for Windows that generates explorer thumbnails for `.svg` and `.svgz` files, written in Rust, with no third party dependencies.
+
+## Why Use This One?
+
+<table>
+  <tbody>
+    <tr>
+      <td><b>No Third-Party Dependencies</b></td>
+      <td>Built using only official Microsoft-published Rust crates (found in the <a href="https://github.com/microsoft/windows-rs"><code>windows&#8209;rs</code></a> repo).</td>
+    </tr>
+    <tr>
+      <td><b>Works Purely Through Windows API</b></td>
+      <td>
+        Operates purely through the built-in Windows API for rendering and COM integration. Just a single native DLL.
+        <ul>
+          ↳ No third party libraries that may go out of date or add overhead
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <td><b>Trusted Certificate Signed</b></td>
+      <td>
+        Signed via Azure Trusted Signing, which requires rigorous verification of real-world identity.
+        <ul>
+          ↳ Proves it's not made by an unaccountable/unknown developer
+        </ul>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ## Screenshot
 <p align="center">
