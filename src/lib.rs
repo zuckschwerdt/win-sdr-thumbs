@@ -144,7 +144,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
         // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
         if let Ok(root_element) = svg_doc.GetRoot() {
-            // Apparently if there are no width and height attributes, CreateSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+            // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
             // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
             let _ = root_element.RemoveAttribute(
                 w!("height")
@@ -214,9 +214,9 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
                 // Pixel alpha is between 0 and 255, aka partially transparent. So we need to calculate the un-premultiplied color.
                 } else {
                     let (b, g, r) = (src_chunk[0], src_chunk[1], src_chunk[2]);
-                    dest_chunk[0] = (((b as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
-                    dest_chunk[1] = (((g as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
-                    dest_chunk[2] = (((r as u32 * 255) + (a as u32 / 2)) / a as u32) as u8;
+                    dest_chunk[0] = ((b as u32 * 255) / a as u32) as u8;
+                    dest_chunk[1] = ((g as u32 * 255) / a as u32) as u8;
+                    dest_chunk[2] = ((r as u32 * 255) / a as u32) as u8;
                     dest_chunk[3] = a;
                 }
             }
