@@ -130,80 +130,75 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
         ..Default::default()
     };
-    let render_target_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt)? };
+    let render_target_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
 
     // 3. Set target and draw the SVG, then apply UnPremultiply effect
-    let final_bitmap = unsafe {
-        d2d_context.SetTarget(&render_target_bitmap);
-        d2d_context.BeginDraw();
-        // Clear to transparent black
-        d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+    unsafe { d2d_context.SetTarget(&render_target_bitmap) };
+    unsafe { d2d_context.BeginDraw() };
+    // Clear to transparent black
+    unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
 
-        // Load svg data into a memory stream as the input for the SVG document
-        let stream: IStream = SHCreateMemStream(Some(svg_data)).ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
+    // Load svg data into a memory stream as the input for the SVG document
+    let stream: IStream = unsafe { SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
 
-        // Create the SVG document from the stream of SVG data
-        let svg_doc = d2d_context.CreateSvgDocument(
-            &stream,
-            D2D_SIZE_F { 
-                width: width as f32, 
-                height: height as f32
-            }
-        )?;
-
-        // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
-        if let Ok(root_element) = svg_doc.GetRoot() {
-            // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
-            // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
-            let _ = root_element.RemoveAttribute(
-                w!("height")
-            );
-            let _ = root_element.RemoveAttribute(
-                w!("width")
-            );
+    // Create the SVG document from the stream of SVG data
+    let svg_doc = unsafe { d2d_context.CreateSvgDocument(
+        &stream,
+        D2D_SIZE_F { 
+            width: width as f32, 
+            height: height as f32
         }
-        
-        d2d_context.DrawSvgDocument(&svg_doc);
-        
-        // Apply UnPremultiply effect
-        match d2d_context.CreateEffect(&CLSID_D2D1UnPremultiply) {
-            Ok(unpremultiply_effect) => {
-                // Create a second render target bitmap for the UnPremultiply effect output
-                let output_bitmap = d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt)?;
-                
-                // Switch to the output bitmap as the target
-                d2d_context.SetTarget(&output_bitmap);
-                
-                // SetInput doesn't return a Result, it's a void method
-                unpremultiply_effect.SetInput(0, &render_target_bitmap, true);
-                
-                match unpremultiply_effect.cast::<ID2D1Image>() {
-                    Ok(effect_image) => {
-                        // DrawImage doesn't return a Result either
-                        d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY);
-                        
-                        d2d_context.EndDraw(None, None)?;
-                        d2d_context.SetTarget(None);
-                        
-                        // Return the output bitmap as our final result
-                        Ok::<_, windows::core::Error>(output_bitmap)
-                    }
-                    Err(_) => {
-                        d2d_context.EndDraw(None, None)?;
-                        d2d_context.SetTarget(None);
-                        // Fall back to original bitmap
-                        Ok::<_, windows::core::Error>(render_target_bitmap)
-                    }
+    ) }?;
+
+    // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
+    if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
+        // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+        // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+        unsafe {
+            let _ = root_element.RemoveAttribute(w!("height"));
+            let _ = root_element.RemoveAttribute(w!("width"));
+        }
+    }
+    
+    unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
+    
+    // Apply UnPremultiply effect
+    let final_bitmap = match unsafe { d2d_context.CreateEffect(&CLSID_D2D1UnPremultiply) } {
+        Ok(unpremultiply_effect) => {
+            // Create a second render target bitmap for the UnPremultiply effect output
+            let output_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+            
+            // Switch to the output bitmap as the target
+            unsafe { d2d_context.SetTarget(&output_bitmap) };
+            
+            // SetInput doesn't return a Result, it's a void method
+            unsafe { unpremultiply_effect.SetInput(0, &render_target_bitmap, true) };
+            
+            match unpremultiply_effect.cast::<ID2D1Image>() {
+                Ok(effect_image) => {
+                    // DrawImage doesn't return a Result either
+                    unsafe { d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY) };
+                    unsafe { d2d_context.EndDraw(None, None) }?;
+                    unsafe { d2d_context.SetTarget(None) };
+                    
+                    // Return the output bitmap as our final result
+                    output_bitmap
+                }
+                Err(_) => {
+                    unsafe { d2d_context.EndDraw(None, None) }?;
+                    unsafe { d2d_context.SetTarget(None) };
+                    // Fall back to original bitmap
+                    render_target_bitmap
                 }
             }
-            Err(_) => {
-                d2d_context.EndDraw(None, None)?;
-                d2d_context.SetTarget(None);
-                // Fall back to original bitmap
-                Ok::<_, windows::core::Error>(render_target_bitmap)
-            }
         }
-    }?;
+        Err(_) => {
+            unsafe { d2d_context.EndDraw(None, None) }?;
+            unsafe { d2d_context.SetTarget(None) };
+            // Fall back to original bitmap
+            render_target_bitmap
+        }
+    };
 
     // 4. Create the CPU-readable STAGING bitmap
     let bitmap_props_staging = D2D1_BITMAP_PROPERTIES1 {
@@ -213,15 +208,15 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         ..Default::default()
     };
-    let staging_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging)? };
+    let staging_bitmap = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
 
     // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
     // This copies the pixel data but it's still in D2D's memory space
-    unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None)? };
+    unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None) }?;
 
     // 6. Map the staging bitmap to get a pointer to the pixel data
     // This gives us a CPU-readable pointer to the D2D staging bitmap's memory
-    let mapped_rect = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ)? };
+    let mapped_rect = unsafe { staging_bitmap.Map(D2D1_MAP_OPTIONS_READ) }?;
 
     // 7. Create the final GDI HBITMAP
     // This creates a separate GDI bitmap with its own memory buffer
@@ -235,11 +230,12 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     let hdc = hdc_guard.0; // Use the raw handle
 
     let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0)? };
+    let hbitmap = unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
     // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
     if !dib_data.is_null() {
+        // Create safe slices from the raw pointers
         let source_data = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
         let dest_data = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
         
@@ -547,23 +543,26 @@ fn create_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
     let dll_path = get_dll_path();
 
+    // Prepare string values outside unsafe block
+    let clsid_wide = to_pcwstr(&clsid_string);
+    let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
+    let path_value = to_pcwstr(&dll_path);
+    let model_value = to_pcwstr("Apartment");
+    let clsid_value = to_pcwstr(&clsid_string);
+
     unsafe {
         // Create CLSID\{our-clsid}
         let mut key = HKEY::default();
         RegCreateKeyW(HKEY_CLASSES_ROOT, w!("CLSID"), &mut key).ok()?;
         let mut clsid_key = HKEY::default();
-        let clsid_wide = to_pcwstr(&clsid_string);
         RegCreateKeyW(key, PCWSTR(clsid_wide.as_ptr()), &mut clsid_key).ok()?;
-        let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
         RegSetValueExW(clsid_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2))).ok()?;
         let _ = RegCloseKey(key);
 
         // Create CLSID\{our-clsid}\InprocServer32
         let mut inproc_key = HKEY::default();
         RegCreateKeyW(clsid_key, w!("InprocServer32"), &mut inproc_key).ok()?;
-        let path_value = to_pcwstr(&dll_path);
         RegSetValueExW(inproc_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
-        let model_value = to_pcwstr("Apartment");
         RegSetValueExW(inproc_key, w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
         let _ = RegCloseKey(inproc_key);
         let _ = RegCloseKey(clsid_key);
@@ -571,7 +570,6 @@ fn create_registry_keys() -> Result<()> {
         // Associate with .svg files
         let mut svg_key = HKEY::default();
         RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut svg_key).ok()?;
-        let clsid_value = to_pcwstr(&clsid_string);
         RegSetValueExW(svg_key, PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
         let _ = RegCloseKey(svg_key);
 
@@ -598,8 +596,10 @@ fn get_dll_path() -> String {
 fn delete_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
 
+    // Prepare string values outside unsafe block
+    let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
+
     unsafe {
-        let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
         RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr())).ok()?;
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
