@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 // use std::fs::OpenOptions;
 // use std::io::Write;
 use std::os::windows::prelude::OsStrExt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{atomic::{AtomicPtr, AtomicU32, Ordering}, Mutex};
 use windows::Win32::System::Com::ISequentialStream;
 use windows::{
@@ -37,32 +38,33 @@ thread_local! {
 /// This function ensures that the heavyweight factory and device objects are created only once per thread.
 fn get_d2d_resources() -> Result<(ID2D1Factory1, IWICImagingFactory, ID2D1Device)> {
     // Get or create the WIC Factory.
-    let wic_factory = WIC_FACTORY.with(|factory| {
+    let wic_factory = WIC_FACTORY.with(|factory| -> Result<IWICImagingFactory> {
         let mut factory_ref = factory.borrow_mut();
         if factory_ref.is_none() {
             // CoInitialize must be called on the thread before using COM.
-            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
-            let wic: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap() };
+            unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+            let wic: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
             *factory_ref = Some(wic);
         }
-        factory_ref.as_ref().unwrap().clone()
-    });
+        // This clone is cheap - it's just incrementing a reference counter.
+        Ok(factory_ref.as_ref().unwrap().clone())
+    })?;
 
     // Get or create the Direct2D Factory.
-    let d2d_factory = D2D_FACTORY.with(|factory| {
+    let d2d_factory = D2D_FACTORY.with(|factory| -> Result<ID2D1Factory1> {
         let mut factory_ref = factory.borrow_mut();
         if factory_ref.is_none() {
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
             };
-            let d2d: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options)).unwrap() };
+            let d2d: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))? };
             *factory_ref = Some(d2d);
         }
-        factory_ref.as_ref().unwrap().clone()
-    });
+        Ok(factory_ref.as_ref().unwrap().clone())
+    })?;
 
     // Get or create the Direct2D Device. This requires a backing D3D11 device.
-    let d2d_device = D2D_DEVICE.with(|device| {
+    let d2d_device = D2D_DEVICE.with(|device| -> Result<ID2D1Device> {
         let mut device_ref = device.borrow_mut();
         if device_ref.is_none() {
             // 1. Create the D3D11 Device
@@ -78,16 +80,16 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, IWICImagingFactory, ID2D1Device
                     Some(&mut d3d_device),
                     None,
                     None,
-                ).unwrap();
+                )?;
             }
-            let dxgi_device: IDXGIDevice = d3d_device.unwrap().cast().unwrap();
+            let dxgi_device: IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
 
             // 2. Create the D2D Device from the D3D11 device
-            let d2d_dev = unsafe { d2d_factory.CreateDevice(&dxgi_device).unwrap() };
+            let d2d_dev = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
             *device_ref = Some(d2d_dev);
         }
-        device_ref.as_ref().unwrap().clone()
-    });
+        Ok(device_ref.as_ref().unwrap().clone())
+    })?;
 
     Ok((d2d_factory, wic_factory, d2d_device))
 }
@@ -132,17 +134,17 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         )?;
 
         // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
-        let root_element = svg_doc.GetRoot()?;
+        if let Ok(root_element) = svg_doc.GetRoot() {
+            // Apparently if there are no width and height attributes, CreateSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+            // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+            let _ = root_element.RemoveAttribute(
+                w!("height")
+            );
+            let _ = root_element.RemoveAttribute(
+                w!("width")
+            );
+        }
         
-        // Apparently if there are no width and height attributes, CreateSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
-        // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
-        let _ = root_element.RemoveAttribute(
-            w!("height")
-        );
-        let _ = root_element.RemoveAttribute(
-            w!("width")
-        );
-
         d2d_context.DrawSvgDocument(&svg_doc);
         d2d_context.EndDraw(None, None)?;
         d2d_context.SetTarget(None);
@@ -218,7 +220,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 }
 
 // =================================================================
-//                    COM Thumbnail Provider Object
+//                 COM Thumbnail Provider Object
 // =================================================================
 
 #[implement(IInitializeWithStream, IThumbnailProvider)]
@@ -243,7 +245,7 @@ impl Drop for ThumbnailProvider {
 
 impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
-    fn Initialize(&self, pstream: windows_core::Ref<'_, IStream>, _grfmode: u32) -> Result<()> {
+    fn Initialize(&self, pstream: Ref<'_, IStream>, _grfmode: u32) -> Result<()> {
         //log_message("Initialize: Entered.");
 
         // Dereference the `Ref` to get the `Option`, then use `if let` to safely unwrap it.
@@ -276,7 +278,9 @@ impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
                 buffer.extend_from_slice(&chunk[..bytes_read as usize]);
             }
             
-            *self.svg_data.lock().unwrap() = Some(buffer);
+            // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
+            let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+            *data_guard = Some(buffer);
             
             //log_message("Initialize: Succeeded.");
             Ok(())
@@ -291,33 +295,52 @@ impl IInitializeWithStream_Impl for ThumbnailProvider_Impl {
 impl IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
     fn GetThumbnail(&self, cx: u32, phbmp: *mut HBITMAP, pdwalpha: *mut WTS_ALPHATYPE) -> Result<()> {
-        //log_message("GetThumbnail: Entered.");
+        // We wrap the entire function body in catch_unwind.
+        // This prevents a panic inside our Rust code from crossing the FFI boundary and crashing the host (DllHost.exe).
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            //log_message("GetThumbnail: Entered.");
 
-        let data_guard = self.svg_data.lock().unwrap();
-        let svg_data = match data_guard.as_ref() {
-            Some(data) => {
-                //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
-                data
-            }
-            None => {
-                //log_message("GetThumbnail: Error - SVG data was not initialized.");
-                return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
-            }
-        };
-
-        match render_svg_to_hbitmap(svg_data, cx, cx) {
-            Ok(hbitmap) => {
-                //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
-                unsafe {
-                    *phbmp = hbitmap;
-                    *pdwalpha = WTSAT_ARGB;
+            let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+            
+            let svg_data = match data_guard.as_ref() {
+                Some(data) => {
+                    //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
+                    data
                 }
-                //log_message("GetThumbnail: Succeeded.");
-                Ok(())
+                None => {
+                    //log_message("GetThumbnail: Error - SVG data was not initialized.");
+                    return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
+                }
+            };
+
+            match render_svg_to_hbitmap(svg_data, cx, cx) {
+                Ok(hbitmap) => {
+                    //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
+                    unsafe {
+                        *phbmp = hbitmap;
+                        *pdwalpha = WTSAT_ARGB;
+                    }
+                    //log_message("GetThumbnail: Succeeded.");
+                    Ok(())
+                }
+                Err(e) => {
+                    //log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
+                    Err(e)
+                }
             }
-            Err(e) => {
-                //log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
-                Err(e)
+        }));
+
+        // Now, we handle the result of the `catch_unwind`.
+        match result {
+            // Ok(Ok(())) means the closure ran without panicking and returned Ok.
+            Ok(Ok(())) => Ok(()),
+            // Ok(Err(e)) means the closure ran without panicking and returned an error. Propagate it.
+            Ok(Err(e)) => Err(e),
+            // Err(_) means the closure panicked.
+            Err(_) => {
+                //log_message("GetThumbnail: A PANIC occurred.");
+                // Return a generic failure HRESULT to COM. This prevents the crash.
+                Err(E_FAIL.into())
             }
         }
     }
@@ -420,7 +443,7 @@ const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0x95724385_3234_4ea4_
 extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *const std::ffi::c_void) -> BOOL {
     if fdw_reason == DLL_PROCESS_ATTACH {
         //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
-        MODULE_HANDLE.store(hinst_dll.0, Ordering::Relaxed);
+        MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Relaxed);
     }
     true.into()
 }
@@ -529,6 +552,8 @@ fn delete_registry_keys() -> Result<()> {
         RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr())).ok()?;
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
         RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
+
+        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
     }
 
     Ok(())
