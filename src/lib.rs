@@ -387,7 +387,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
 #[implement(Shell::PropertiesSystem::IInitializeWithStream, Shell::IThumbnailProvider)]
 struct ThumbnailProvider {
-    svg_data: Mutex<Option<Arc<Vec<u8>>>>,
+    svg_data: Mutex<Option<Arc<[u8]>>>,
 }
 
 impl Default for ThumbnailProvider {
@@ -411,16 +411,18 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
         ffi_guard!(Result<()>, {
             //log_message("Initialize: Entered.");
 
-            // Now safely dereference and pattern match on the Option
+            // Guard against repeated initialization calls
+            if self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
+                return Err(Error::from(HRESULT::from_win32(ERROR_ALREADY_INITIALIZED.0)));
+            }
+
             match &*pstream {
                 Some(stream) => {
                     //log_message("Initialize: Stream is valid. Proceeding to read.");
 
-                    // Now that we have a valid `IStream`, cast it to the interface with the Read method.
                     let seq_stream: Com::ISequentialStream = stream.cast()?;
-
                     let mut buffer: Vec<u8> = Vec::new();
-                    let mut chunk: Vec<u8>  = vec![0u8; 65536];
+                    let mut chunk: Vec<u8> = vec![0u8; 65536];
                     
                     loop {
                         let mut bytes_read: u32 = 0;
@@ -434,15 +436,14 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                         };
                         
                         if hr.is_err() || bytes_read == 0 {
-                            //log_message(&format!("Initialize: Finished reading stream. Total bytes read: {}.", buffer.len()));
                             break;
                         }
                         
                         buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                     }
                     
-                    // Directly assign to the mutex without temporary variable
-                    *self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::new(buffer));
+                    // Convert to Arc<[u8]> to save memory overhead
+                    *self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::from(buffer.into_boxed_slice()));
                     
                     //log_message("Initialize: Succeeded.");
                     Ok(())
@@ -678,7 +679,7 @@ fn create_registry_keys() -> Result<()> {
     let clsid_wide = to_pcwstr(&clsid_string);
     let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
     let path_value = to_pcwstr(&dll_path);
-    let model_value = to_pcwstr("Apartment");
+    let model_value = to_pcwstr("Both");
     let clsid_value = to_pcwstr(&clsid_string);
 
     unsafe {
