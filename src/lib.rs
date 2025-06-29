@@ -595,7 +595,7 @@ fn dll_add_ref() {
     DLL_REFERENCES.fetch_add(1, Ordering::Relaxed);
 }
 fn dll_release() {
-    DLL_REFERENCES.fetch_sub(1, Ordering::Relaxed);
+    DLL_REFERENCES.fetch_sub(1, Ordering::Release);
 }
 
 // This is our thumbnail provider's unique Class ID (CLSID).
@@ -648,7 +648,7 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
 #[allow(non_snake_case)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
     ffi_guard!(HRESULT, {
-        if DLL_REFERENCES.load(Ordering::Relaxed) == 0 {
+        if DLL_REFERENCES.load(Ordering::Acquire) == 0 {
             S_OK
         } else {
             S_FALSE
