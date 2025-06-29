@@ -427,8 +427,6 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
     #[allow(non_snake_case)]
     fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
         ffi_guard!(Result<()>, {
-            //log_message("Initialize: Entered.");
-
             // Guard against repeated initialization calls
             if self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
                 return Err(Error::from(HRESULT::from_win32(ERROR_ALREADY_INITIALIZED.0)));
@@ -436,15 +434,28 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
 
             match &*pstream {
                 Some(stream) => {
-                    //log_message("Initialize: Stream is valid. Proceeding to read.");
+                    // 101 MiB max file size.
+                    const MAX_SIZE: u64 = 101 * 1024 * 1024;
+                    pub const ERROR_FILE_TOO_LARGE: WIN32_ERROR = WIN32_ERROR(223u32);
 
+                    // Fast Fail Check: Ask the stream for its size for a quick rejection.
+                    // If the size check fails continue to read the stream in chunks, there is another safety net below.
+                    let mut statstg = Default::default();
+                    if unsafe { stream.Stat(&mut statstg, Com::STATFLAG_NONAME) }.is_ok() {
+                        let stream_size = statstg.cbSize;
+                        if stream_size > 0 && stream_size > MAX_SIZE {
+                            return Err(Error::from(HRESULT::from_win32(ERROR_FILE_TOO_LARGE.0)));
+                        }
+                    }
+
+                    // Do not trust the reported size for allocation.
+                    // Start with a default-sized Vec and let it grow.
                     let seq_stream: Com::ISequentialStream = stream.cast()?;
                     let mut buffer: Vec<u8> = Vec::new();
                     let mut chunk: Vec<u8> = vec![0u8; 65536];
                     
                     loop {
                         let mut bytes_read: u32 = 0;
-                        
                         let hr: HRESULT = unsafe {
                             seq_stream.Read(
                                 chunk.as_mut_ptr() as *mut core::ffi::c_void,
@@ -455,6 +466,11 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                         
                         if hr.is_err() || bytes_read == 0 {
                             break;
+                        }
+                        
+                        // Extra file size safety net protects memory usage in case statstg failed or returned a wrong size.
+                        if buffer.len() + (bytes_read as usize) > (MAX_SIZE as usize) {
+                            return Err(Error::from(HRESULT::from_win32(ERROR_FILE_TOO_LARGE.0)));
                         }
                         
                         buffer.extend_from_slice(&chunk[..bytes_read as usize]);
