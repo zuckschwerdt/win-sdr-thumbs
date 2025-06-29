@@ -469,20 +469,23 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
         ffi_guard!(Result<()>, {
             //log_message("GetThumbnail: Entered.");
 
-            let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
-            
-            let svg_data = match data_guard.as_ref() {
-                Some(data) => {
-                    //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
-                    data
+            // Clone the SVG data and release the mutex before rendering to prevent deadlocks
+            let svg_data = {
+                let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+                
+                match data_guard.as_ref() {
+                    Some(data) => {
+                        //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
+                        data.clone() // Clone the data to release the lock
+                    }
+                    None => {
+                        //log_message("GetThumbnail: Error - SVG data was not initialized.");
+                        return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
+                    }
                 }
-                None => {
-                    //log_message("GetThumbnail: Error - SVG data was not initialized.");
-                    return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
-                }
-            };
+            }; // Mutex lock is released here
 
-            match render_svg_to_hbitmap(svg_data, cx, cx) {
+            match render_svg_to_hbitmap(&svg_data, cx, cx) {
                 Ok(hbitmap) => {
                     //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
                     unsafe {
