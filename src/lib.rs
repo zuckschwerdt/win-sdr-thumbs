@@ -84,8 +84,42 @@ macro_rules! ffi_guard {
     }};
 }
 
+// RAII wrapper for COM initialization - automatically calls CoUninitialize when dropped
+struct ComGuard {
+    initialized_by_us: bool,
+}
+
+impl ComGuard {
+    fn new() -> Result<Self> {
+        let hr: HRESULT = unsafe { Com::CoInitializeEx(None, Com::COINIT_APARTMENTTHREADED) };
+        match hr {
+            S_OK => {
+                // We successfully initialized COM, so we're responsible for cleanup
+                Ok(Self { initialized_by_us: true })
+            }
+            S_FALSE => {
+                // COM was already initialized by someone else, don't clean up
+                Ok(Self { initialized_by_us: false })
+            }
+            _ => {
+                // Real error
+                Err(Error::new(hr, "Failed to initialize COM"))
+            }
+        }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.initialized_by_us {
+            unsafe { Com::CoUninitialize() };
+        }
+    }
+}
+
 // --- Thread-local storage for COM objects that cannot be shared between threads ---
 thread_local! {
+    static COM_GUARD: RefCell<Option<ComGuard>> = RefCell::new(None);
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
     static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
     static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
@@ -97,14 +131,14 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
     let d2d_factory = D2D_FACTORY.with(|factory| -> Result<ID2D1Factory1> {
         let mut factory_ref = factory.borrow_mut();
         if factory_ref.is_none() {
-            // CoInitialize must be called on the thread before using COM.
-                // S_FALSE means COM was already initialized, which is fine
-                // S_OK means we successfully initialized COM
-                // Any other result is a real error we should propagate
-            let hr: HRESULT = unsafe { Com::CoInitializeEx(None, Com::COINIT_APARTMENTTHREADED) };
-            if hr != S_OK && hr != S_FALSE {
-                return Err(Error::new(hr, "Failed to initialize COM"));
-            }
+            // Ensure COM is initialized with proper cleanup tracking
+            COM_GUARD.with(|guard| -> Result<()> {
+                let mut guard_ref = guard.borrow_mut();
+                if guard_ref.is_none() {
+                    *guard_ref = Some(ComGuard::new()?);
+                }
+                Ok(())
+            })?;
             
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
