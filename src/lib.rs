@@ -136,10 +136,20 @@ thread_local! {
     static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
     static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
     static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
+    // This flag tracks if the D2D resources are in a bad state and need to be recreated.
+    static D2D_RESOURCES_POISONED: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 /// Initializes and retrieves the thread-local Direct2D and WIC resources.
 /// This function ensures that the heavyweight factory and device objects are created only once per thread.
 fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext5)> {
+    // If the resources were marked as poisoned (like by a previous EndDraw failure), clear the cached device and context. They will be recreated below.
+    if D2D_RESOURCES_POISONED.get() {
+        D2D_DEVICE.with(|d| d.borrow_mut().take());
+        D2D_CONTEXT.with(|c| c.borrow_mut().take());
+        // Reset the flag now that we've cleared the caches.
+        D2D_RESOURCES_POISONED.set(false);
+    }
+
     // Get or create the Direct2D Factory.
     let d2d_factory = D2D_FACTORY.with(|factory| -> Result<ID2D1Factory1> {
         let mut factory_ref = factory.borrow_mut();
@@ -239,164 +249,186 @@ impl<'a> D2D1DrawGuard<'a> {
 
 impl<'a> Drop for D2D1DrawGuard<'a> {
     fn drop(&mut self) {
-        // Ignore errors in drop - we can't handle them anyway
-        unsafe { let _ = self.context.EndDraw(None, None); }
+        // Check the result of EndDraw. If the device is lost, poison the thread's resources so they will be recreated on the next run.
+        let result = unsafe { self.context.EndDraw(None, None) };
+        if let Err(e) = &result {
+            if e.code() == D2DERR_RECREATE_TARGET {
+                D2D_RESOURCES_POISONED.set(true);
+            }
+        }
     }
 }
 
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<Gdi::HBITMAP> {
-    // Early validation - avoid work for invalid sizes
-    if width == 0 || height == 0 || width > 4096 || height > 4096 {
-        return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
-    }
-
-    // 1. Get resources (now includes cached device context)
-    let (_d2d_factory, _d2d_device, d2d_context) = get_d2d_resources()?;
-
-    // 2. Create the D2D RENDER TARGET bitmap (GPU-only)
-    let bitmap_props_rt = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-        ..Default::default()
-    };
-    let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
-
-    // 3. Set target and draw the SVG
-    unsafe { d2d_context.SetTarget(&render_target_bitmap) };
-    {
-        let _draw_guard = D2D1DrawGuard::new(&d2d_context);
-        // Clear to transparent black
-        unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
-
-        // Load svg data into a memory stream as the input for the SVG document
-        let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
-
-        // Create the SVG document from the stream of SVG data
-        let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
-            &stream,
-            D2D_SIZE_F { 
-                width: width as f32, 
-                height: height as f32
-            }
-        ) }?;
-
-        // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
-        if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
-            // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
-            // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
-            unsafe {
-                let _ = root_element.RemoveAttribute(w!("height"));
-                let _ = root_element.RemoveAttribute(w!("width"));
-            }
+    // Encapsulate main rendering logic in a helper closure.
+    // This makes it easier to catch any error, check if it's D2DERR_RECREATE_TARGET, poison the resources if needed, and then return the original error.
+    let result = (|| -> Result<Gdi::HBITMAP> {
+        // Early validation - avoid work for invalid sizes
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
         }
+
+        // 1. Get resources (now includes cached device context)
+        let (_d2d_factory, _d2d_device, d2d_context) = get_d2d_resources()?;
         
-        unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
-    } // EndDraw called here by guard
-    
-    // Clear target before applying effects
-    unsafe { d2d_context.SetTarget(None) };
-    
-    // Apply UnPremultiply effect
-    let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
-        Ok(unpremultiply_effect) => {
-            // Create a second render target bitmap for the UnPremultiply effect output
-            let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+        // 2. Create the D2D RENDER TARGET bitmap (GPU-only)
+        let bitmap_props_rt = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+        
+        // 3. Set target and draw the SVG
+        unsafe { d2d_context.SetTarget(&render_target_bitmap) };
+        {
+            let _draw_guard = D2D1DrawGuard::new(&d2d_context);
             
-            // Switch to the output bitmap as the target and begin a new draw session
-            unsafe { d2d_context.SetTarget(&output_bitmap) };
-            {
-                let _effect_draw_guard = D2D1DrawGuard::new(&d2d_context);
-                
-                // SetInput doesn't return a Result, it's a void method
-                unsafe { unpremultiply_effect.SetInput(0, &render_target_bitmap, true) };
-                
-                match unpremultiply_effect.cast::<ID2D1Image>() {
-                    Ok(effect_image) => {
-                        // DrawImage doesn't return a Result either
-                        unsafe { d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY) };
-                    }
-                    Err(_) => {
-                        // Effect cast failed, but we'll still return the output bitmap
-                        // The draw guard will clean up properly
-                    }
+            // Clear to transparent black
+            unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
+            
+            // Load svg data into a memory stream as the input for the SVG document
+            let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
+            
+            // Create the SVG document from the stream of SVG data
+            let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
+                &stream,
+                D2D_SIZE_F { 
+                    width: width as f32, 
+                    height: height as f32
                 }
-            } // EndDraw called here by guard
+            ) }?;
             
-            // Clear target after effect drawing
-            unsafe { d2d_context.SetTarget(None) };
-            output_bitmap
-        }
-        Err(_) => {
-            // Fall back to original bitmap if effect creation fails
-            render_target_bitmap
-        }
-    };
-
-    // 4. Create the CPU-readable STAGING bitmap
-    let bitmap_props_staging = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-        ..Default::default()
-    };
-    let staging_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
-
-    // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
-    // This copies the pixel data but it's still in D2D's memory space
-    unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None) }?;
-
-    // 6. Map the staging bitmap to get a pointer to the pixel data using RAII guard
-    let (map_guard, mapped_rect) = BitmapMapGuard::new(&staging_bitmap)?;
-
-    // 7. Create the final GDI HBITMAP
-    // This creates a separate GDI bitmap with its own memory buffer
-    let bmi = Gdi::BITMAPINFO { bmiHeader: Gdi::BITMAPINFOHEADER {
-        biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
-        biPlanes: 1, biBitCount: 32, biCompression: Gdi::BI_RGB.0 as u32, ..Default::default()
-    }, ..Default::default() };
-
-    let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
-
-    // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
-    if !dib_data.is_null() {
-        // Create safe slices from the raw pointers.
-        let source_data: &[u8] = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
-        let dest_data: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
-        
-        // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent
-        // garbage data in any padding bytes left over from a stride mismatch.
-        dest_data.fill(0);
-
-        // Now, copy the image data.
-        if mapped_rect.pitch == (width * 4) {
-            // Direct copy if stride matches.
-            dest_data.copy_from_slice(&source_data[..dest_data.len()]);
-        } else {
-            // Copy row by row to handle stride differences.
-            let dest_stride: usize = (width * 4) as usize;
-            let source_stride: usize = mapped_rect.pitch as usize;
-            let row_copy_len = std::cmp::min(dest_stride, source_stride);
-
-            for y in 0..height as usize {
-                let src_start: usize = y * source_stride;
-                let dest_start: usize = y * dest_stride;
-                
-                let src_slice = &source_data[src_start .. src_start + row_copy_len];
-                let dest_slice = &mut dest_data[dest_start .. dest_start + row_copy_len];
-                dest_slice.copy_from_slice(src_slice);
+            // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
+            if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
+                // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+                // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+                unsafe {
+                    let _ = root_element.RemoveAttribute(w!("height"));
+                    let _ = root_element.RemoveAttribute(w!("width"));
+                }
             }
+            
+            unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
+        } // EndDraw called here by guard
+        
+        // Clear target before applying effects
+        unsafe { d2d_context.SetTarget(None) };
+        
+        // Apply UnPremultiply effect
+        let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
+            Ok(unpremultiply_effect) => {
+                // Create a second render target bitmap for the UnPremultiply effect output
+                let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+                
+                // Switch to the output bitmap as the target and begin a new draw session
+                unsafe { d2d_context.SetTarget(&output_bitmap) };
+                {
+                    let _effect_draw_guard = D2D1DrawGuard::new(&d2d_context);
+                    
+                    // SetInput doesn't return a Result, it's a void method
+                    unsafe { unpremultiply_effect.SetInput(0, &render_target_bitmap, true) };
+                    
+                    match unpremultiply_effect.cast::<ID2D1Image>() {
+                        Ok(effect_image) => {
+                            // DrawImage doesn't return a Result either
+                            unsafe { d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY) };
+                        }
+                        Err(_) => {
+                            // Effect cast failed, but we'll still return the output bitmap
+                            // The draw guard will clean up properly
+                        }
+                    }
+                } // EndDraw called here by guard
+                
+                // Clear target after effect drawing
+                unsafe { d2d_context.SetTarget(None) };
+                
+                // Return the output bitmap from the UnPremultiply effect
+                output_bitmap
+            }
+            Err(_) => {
+                // Fall back to original bitmap if effect creation fails
+                render_target_bitmap
+            }
+        };
+
+        // 4. Create the CPU-readable STAGING bitmap
+        let bitmap_props_staging = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+            ..Default::default()
+        };
+        let staging_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
+        
+        // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
+        // This copies the pixel data but it's still in D2D's memory space
+        unsafe { staging_bitmap.CopyFromBitmap(None, &final_bitmap, None) }?;
+        
+        // 6. Map the staging bitmap to get a pointer to the pixel data using RAII guard
+        let (map_guard, mapped_rect) = BitmapMapGuard::new(&staging_bitmap)?;
+        
+        // 7. Create the final GDI HBITMAP
+        // This creates a separate GDI bitmap with its own memory buffer
+        let bmi = Gdi::BITMAPINFO { bmiHeader: Gdi::BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
+            biPlanes: 1, biBitCount: 32, biCompression: Gdi::BI_RGB.0 as u32, ..Default::default()
+        }, ..Default::default() };
+
+        let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
+        let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
+        
+        // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
+        if !dib_data.is_null() {
+            // Create safe slices from the raw pointers.
+            let source_data: &[u8] = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
+            let dest_data: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
+            
+            // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent
+            // garbage data in any padding bytes left over from a stride mismatch.
+            dest_data.fill(0);
+
+            // Now, copy the image data.
+            if mapped_rect.pitch == (width * 4) {
+                // Direct copy if stride matches.
+                dest_data.copy_from_slice(&source_data[..dest_data.len()]);
+            } else {
+                // Copy row by row to handle stride differences.
+                let dest_stride: usize = (width * 4) as usize;
+                let source_stride: usize = mapped_rect.pitch as usize;
+                let row_copy_len = std::cmp::min(dest_stride, source_stride);
+
+                for y in 0..height as usize {
+                    let src_start: usize = y * source_stride;
+                    let dest_start: usize = y * dest_stride;
+                    
+                    let src_slice = &source_data[src_start .. src_start + row_copy_len];
+                    let dest_slice = &mut dest_data[dest_start .. dest_start + row_copy_len];
+                    dest_slice.copy_from_slice(src_slice);
+                }
+            }
+        }
+
+        // The map_guard will automatically unmap the bitmap when it goes out of scope
+        drop(map_guard);
+        
+        Ok(hbitmap)
+    })();
+
+    // Check if the closure returned an error, and if that error was due to a lost device.
+    // Set the poisoned flag if so, to force recreation of resources next time.
+    if let Err(e) = &result {
+        if e.code() == D2DERR_RECREATE_TARGET {
+            D2D_RESOURCES_POISONED.set(true);
         }
     }
 
-    // The map_guard will automatically unmap the bitmap when it goes out of scope
-    drop(map_guard);
-
-    Ok(hbitmap)
+    result
 }
 
 // =================================================================
