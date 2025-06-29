@@ -377,12 +377,13 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // Copy row by row to handle stride differences
             let dest_stride: usize = (width * 4) as usize;
             let source_stride: usize = mapped_rect.pitch as usize;
-            
             for y in 0..height as usize {
                 let src_start: usize = y * source_stride;
                 let dest_start: usize = y * dest_stride;
-                dest_data[dest_start..dest_start + dest_stride]
-                    .copy_from_slice(&source_data[src_start..src_start + dest_stride]);
+                let copy_len = std::cmp::min(dest_stride, source_stride);
+                dest_data[dest_start..dest_start + copy_len]
+                    .copy_from_slice(&source_data[src_start..src_start + copy_len]);
+                // If dest_stride > source_stride, the remaining bytes in dest row are left as-is (could optionally zero them)
             }
         }
     }

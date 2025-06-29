@@ -40,3 +40,4 @@ windows-registry = "0.5"
 # Unused but good to remember
 #windows-sys = { version = "0.60", features = ["Win32_System_Registry","Win32_Security"]}
 #windows-implement = "0.61"
+#windows-strings = "0.4"
