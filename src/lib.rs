@@ -354,46 +354,54 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
         ffi_guard!(Result<()>, {
             //log_message("Initialize: Entered.");
 
-            // Dereference the `Ref` to get the `Option`, then use `if let` to safely unwrap it.
-            // This is the correct pattern that satisfies all compiler errors.
-            if let Some(stream) = &*pstream {
-                //log_message("Initialize: Stream is valid. Proceeding to read.");
+            // Safely check for null pointer first, then dereference to get the Option
+            if pstream.is_null() {
+                //log_message("Initialize: Error - Stream pointer is null.");
+                return Err(E_INVALIDARG.into());
+            }
 
-                // Now that we have a valid `IStream`, cast it to the interface with the Read method.
-                let seq_stream: Com::ISequentialStream = stream.cast()?;
+            // Now safely dereference and pattern match on the Option
+            match &*pstream {
+                Some(stream) => {
+                    //log_message("Initialize: Stream is valid. Proceeding to read.");
 
-                let mut buffer: Vec<u8> = Vec::new();
-                let mut chunk: Vec<u8>  = vec![0u8; 65536];
-                
-                loop {
-                    let mut bytes_read: u32 = 0;
+                    // Now that we have a valid `IStream`, cast it to the interface with the Read method.
+                    let seq_stream: Com::ISequentialStream = stream.cast()?;
+
+                    let mut buffer: Vec<u8> = Vec::new();
+                    let mut chunk: Vec<u8>  = vec![0u8; 65536];
                     
-                    let hr: HRESULT = unsafe {
-                        seq_stream.Read(
-                            chunk.as_mut_ptr() as *mut core::ffi::c_void,
-                            chunk.len() as u32,
-                            Some(&mut bytes_read)
-                        )
-                    };
-                    
-                    if hr.is_err() || bytes_read == 0 {
-                        //log_message(&format!("Initialize: Finished reading stream. Total bytes read: {}.", buffer.len()));
-                        break;
+                    loop {
+                        let mut bytes_read: u32 = 0;
+                        
+                        let hr: HRESULT = unsafe {
+                            seq_stream.Read(
+                                chunk.as_mut_ptr() as *mut core::ffi::c_void,
+                                chunk.len() as u32,
+                                Some(&mut bytes_read)
+                            )
+                        };
+                        
+                        if hr.is_err() || bytes_read == 0 {
+                            //log_message(&format!("Initialize: Finished reading stream. Total bytes read: {}.", buffer.len()));
+                            break;
+                        }
+                        
+                        buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                     }
                     
-                    buffer.extend_from_slice(&chunk[..bytes_read as usize]);
+                    // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
+                    let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+                    *data_guard = Some(buffer);
+                    
+                    //log_message("Initialize: Succeeded.");
+                    Ok(())
                 }
-                
-                // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
-                let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
-                *data_guard = Some(buffer);
-                
-                //log_message("Initialize: Succeeded.");
-                Ok(())
-            } else {
-                // This case handles if Windows passes a null pointer.
-                //log_message("Initialize: Error - Stream was null.");
-                Err(E_INVALIDARG.into())
+                None => {
+                    // This case handles if Windows passes a null stream.
+                    //log_message("Initialize: Error - Stream was null.");
+                    Err(E_INVALIDARG.into())
+                }
             }
         })
     }
