@@ -571,9 +571,8 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
         // Query for the interface the caller wants (usually IClassFactory) and return it.
         let hr: HRESULT = unsafe { factory.query(riid, ppv) };
         
-        // This is important! The factory is created with a ref count of 1. `query` increments it to 2.
-        // We must release our original reference so that only the caller holds a reference.
-        std::mem::forget(factory);
+        // The factory variable will automatically drop here, releasing our local reference.
+        // The caller retains their reference from the query() call.
 
         //log_message(&format!("DllGetClassObject: Exiting with HRESULT: {:?}", hr));
         
