@@ -739,7 +739,7 @@ fn to_pcwstr(s: &str) -> Vec<u16> {
 
 fn create_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-    let dll_path: String = get_dll_path();
+    let dll_path: String = get_dll_path()?;
 
     // Prepare string values outside unsafe block
     let clsid_wide = to_pcwstr(&clsid_string);
@@ -793,21 +793,31 @@ fn create_registry_keys() -> Result<()> {
     Ok(())
 }
 
-fn get_dll_path() -> String {
+fn get_dll_path() -> Result<String> {
     let handle_ptr: *mut std::ffi::c_void = MODULE_HANDLE.load(Ordering::Acquire);
-    
+
     // Check for null pointer to avoid potential crashes
     if handle_ptr.is_null() {
-        return String::new(); // Return empty string if handle is invalid
+        return Err(Error::new(E_FAIL, "MODULE_HANDLE is null; DLL not loaded?"));
     }
-    
+
     let handle: HMODULE = HMODULE(handle_ptr);
     let mut path = vec![0u16; MAX_PATH as usize];
     let len: u32 = unsafe { System::LibraryLoader::GetModuleFileNameW(Some(handle), &mut path) };
-    
+
+    // If the returned length is zero, it's an error
+    if len == 0 {
+        return Err(Error::new(E_FAIL, "GetModuleFileNameW failed (returned 0)"));
+    }
+
+    // If the returned length is equal to the buffer size, truncation may have occurred
+    if (len as usize) >= path.len() {
+        return Err(Error::new(E_FAIL, "DLL path is too long (truncated); registration aborted"));
+    }
+
     // Additional safety check - ensure we don't go beyond the buffer
     let len = std::cmp::min(len as usize, path.len());
-    String::from_utf16_lossy(&path[..len])
+    Ok(String::from_utf16_lossy(&path[..len]))
 }
 
 // RAII wrapper for registry keys - automatically closes when dropped
