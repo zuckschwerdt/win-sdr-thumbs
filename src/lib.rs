@@ -212,6 +212,25 @@ impl<'a> Drop for BitmapMapGuard<'a> {
     }
 }
 
+// RAII wrapper for D2D BeginDraw/EndDraw - automatically calls EndDraw when dropped
+struct D2D1DrawGuard<'a> {
+    context: &'a ID2D1DeviceContext5,
+}
+
+impl<'a> D2D1DrawGuard<'a> {
+    fn new(context: &'a ID2D1DeviceContext5) -> Self {
+        unsafe { context.BeginDraw() };
+        Self { context }
+    }
+}
+
+impl<'a> Drop for D2D1DrawGuard<'a> {
+    fn drop(&mut self) {
+        // Ignore errors in drop - we can't handle them anyway
+        unsafe { let _ = self.context.EndDraw(None, None); }
+    }
+}
+
 /// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<Gdi::HBITMAP> {
     // Early validation - avoid work for invalid sizes
@@ -232,35 +251,40 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     };
     let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
 
-    // 3. Set target and draw the SVG, then apply UnPremultiply effect
+    // 3. Set target and draw the SVG
     unsafe { d2d_context.SetTarget(&render_target_bitmap) };
-    unsafe { d2d_context.BeginDraw() };
-    // Clear to transparent black
-    unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
+    {
+        let _draw_guard = D2D1DrawGuard::new(&d2d_context);
+        // Clear to transparent black
+        unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
 
-    // Load svg data into a memory stream as the input for the SVG document
-    let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
+        // Load svg data into a memory stream as the input for the SVG document
+        let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
 
-    // Create the SVG document from the stream of SVG data
-    let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
-        &stream,
-        D2D_SIZE_F { 
-            width: width as f32, 
-            height: height as f32
+        // Create the SVG document from the stream of SVG data
+        let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
+            &stream,
+            D2D_SIZE_F { 
+                width: width as f32, 
+                height: height as f32
+            }
+        ) }?;
+
+        // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
+        if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
+            // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+            // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+            unsafe {
+                let _ = root_element.RemoveAttribute(w!("height"));
+                let _ = root_element.RemoveAttribute(w!("width"));
+            }
         }
-    ) }?;
-
-    // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
-    if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
-        // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
-        // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
-        unsafe {
-            let _ = root_element.RemoveAttribute(w!("height"));
-            let _ = root_element.RemoveAttribute(w!("width"));
-        }
-    }
+        
+        unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
+    } // EndDraw called here by guard
     
-    unsafe { d2d_context.DrawSvgDocument(&svg_doc) };
+    // Clear target before applying effects
+    unsafe { d2d_context.SetTarget(None) };
     
     // Apply UnPremultiply effect
     let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
@@ -268,34 +292,32 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // Create a second render target bitmap for the UnPremultiply effect output
             let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
             
-            // Switch to the output bitmap as the target
+            // Switch to the output bitmap as the target and begin a new draw session
             unsafe { d2d_context.SetTarget(&output_bitmap) };
-            
-            // SetInput doesn't return a Result, it's a void method
-            unsafe { unpremultiply_effect.SetInput(0, &render_target_bitmap, true) };
-            
-            match unpremultiply_effect.cast::<ID2D1Image>() {
-                Ok(effect_image) => {
-                    // DrawImage doesn't return a Result either
-                    unsafe { d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY) };
-                    unsafe { d2d_context.EndDraw(None, None) }?;
-                    unsafe { d2d_context.SetTarget(None) };
-                    
-                    // Return the output bitmap as our final result
-                    output_bitmap
+            {
+                let _effect_draw_guard = D2D1DrawGuard::new(&d2d_context);
+                
+                // SetInput doesn't return a Result, it's a void method
+                unsafe { unpremultiply_effect.SetInput(0, &render_target_bitmap, true) };
+                
+                match unpremultiply_effect.cast::<ID2D1Image>() {
+                    Ok(effect_image) => {
+                        // DrawImage doesn't return a Result either
+                        unsafe { d2d_context.DrawImage(&effect_image, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_COPY) };
+                    }
+                    Err(_) => {
+                        // Effect cast failed, but we'll still return the output bitmap
+                        // The draw guard will clean up properly
+                    }
                 }
-                Err(_) => {
-                    unsafe { d2d_context.EndDraw(None, None) }?;
-                    unsafe { d2d_context.SetTarget(None) };
-                    // Fall back to original bitmap
-                    render_target_bitmap
-                }
-            }
+            } // EndDraw called here by guard
+            
+            // Clear target after effect drawing
+            unsafe { d2d_context.SetTarget(None) };
+            output_bitmap
         }
         Err(_) => {
-            unsafe { d2d_context.EndDraw(None, None) }?;
-            unsafe { d2d_context.SetTarget(None) };
-            // Fall back to original bitmap
+            // Fall back to original bitmap if effect creation fails
             render_target_bitmap
         }
     };
