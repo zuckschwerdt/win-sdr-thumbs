@@ -194,7 +194,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
     let d2d_context = D2D_CONTEXT.with(|context| -> Result<ID2D1DeviceContext5> {
         let mut context_ref = context.borrow_mut();
         if context_ref.is_none() {
-            let dc: ID2D1DeviceContext = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_ENABLE_MULTITHREADED_OPTIMIZATIONS)? };
+            let dc: ID2D1DeviceContext = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
             let dc5: ID2D1DeviceContext5 = dc.cast()?;
             *context_ref = Some(dc5);
         }
@@ -692,7 +692,7 @@ fn create_registry_keys() -> Result<()> {
     let clsid_wide = to_pcwstr(&clsid_string);
     let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
     let path_value = to_pcwstr(&dll_path);
-    let model_value = to_pcwstr("Both");
+    let model_value = to_pcwstr("Apartment");
     let clsid_value = to_pcwstr(&clsid_string);
 
     unsafe {
