@@ -363,27 +363,32 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
     let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
-    // Even though CopyFromBitmap moved data to CPU-accessible memory, it's still in D2D's memory space. We need to copy it to the GDI bitmap's memory.
     if !dib_data.is_null() {
-        // Create safe slices from the raw pointers
+        // Create safe slices from the raw pointers.
         let source_data: &[u8] = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
         let dest_data: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
         
-        // Since the UnPremultiply effect already handled the alpha conversion, we can do a simple memory copy if the stride matches
+        // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent
+        // garbage data in any padding bytes left over from a stride mismatch.
+        dest_data.fill(0);
+
+        // Now, copy the image data.
         if mapped_rect.pitch == (width * 4) {
-            // Direct copy - no stride mismatch
+            // Direct copy if stride matches.
             dest_data.copy_from_slice(&source_data[..dest_data.len()]);
         } else {
-            // Copy row by row to handle stride differences
+            // Copy row by row to handle stride differences.
             let dest_stride: usize = (width * 4) as usize;
             let source_stride: usize = mapped_rect.pitch as usize;
+            let row_copy_len = std::cmp::min(dest_stride, source_stride);
+
             for y in 0..height as usize {
                 let src_start: usize = y * source_stride;
                 let dest_start: usize = y * dest_stride;
-                let copy_len = std::cmp::min(dest_stride, source_stride);
-                dest_data[dest_start..dest_start + copy_len]
-                    .copy_from_slice(&source_data[src_start..src_start + copy_len]);
-                // If dest_stride > source_stride, the remaining bytes in dest row are left as-is (could optionally zero them)
+                
+                let src_slice = &source_data[src_start .. src_start + row_copy_len];
+                let dest_slice = &mut dest_data[dest_start .. dest_start + row_copy_len];
+                dest_slice.copy_from_slice(src_slice);
             }
         }
     }
@@ -722,15 +727,17 @@ fn create_registry_keys() -> Result<()> {
         RegSetValueExW(inproc_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
         RegSetValueExW(inproc_key.get(), w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
 
-        // Associate with .svg files
-        let svg_key = RegistryKeyGuard(HKEY_CLASSES_ROOT)
-            .create_subkey(&w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-        RegSetValueExW(svg_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
+        // Associate with .svg files by creating the key path explicitly in the correct registry view
+        let svg_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
+        let svg_shellex_key = svg_root_key.create_subkey(&w!("shellex"))?;
+        let svg_handler_key = svg_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+        RegSetValueExW(svg_handler_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         // Associate with .svgz files
-        let svgz_key = RegistryKeyGuard(HKEY_CLASSES_ROOT)
-            .create_subkey(&w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-        RegSetValueExW(svgz_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
+        let svgz_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svgz"))?;
+        let svgz_shellex_key = svgz_root_key.create_subkey(&w!("shellex"))?;
+        let svgz_handler_key = svgz_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+        RegSetValueExW(svgz_handler_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None);
     }
