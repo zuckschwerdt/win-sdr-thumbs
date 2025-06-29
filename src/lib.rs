@@ -34,11 +34,23 @@ use windows::{
         System::{
             self,
             Com,
-            Registry::*
+            Registry::{
+                *,
+                RegCreateKeyExW,
+                RegSetValueExW,
+            }
         },
         UI::Shell
     },
 };
+
+// Use correct registry view for 32-bit process on 64-bit Windows
+// If read access needed later add KEY_READ to both
+#[cfg(target_pointer_width = "32")]
+const WRITE_FLAGS: REG_SAM_FLAGS = KEY_WRITE | KEY_WOW64_64KEY;
+
+#[cfg(not(target_pointer_width = "32"))]
+const WRITE_FLAGS: REG_SAM_FLAGS = KEY_WRITE;
 
 // =================================================================
 //                  FFI Panic Safety Macro
@@ -686,7 +698,18 @@ fn create_registry_keys() -> Result<()> {
         // Create CLSID\{our-clsid} - using RAII wrapper for automatic cleanup
         let clsid_root_key = {
             let mut key = HKEY::default();
-            RegCreateKeyW(HKEY_CLASSES_ROOT, w!("CLSID"), &mut key).ok()?;
+            let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
+            RegCreateKeyExW(
+                HKEY_CLASSES_ROOT,
+                w!("CLSID"),
+                None,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                WRITE_FLAGS,
+                None,
+                &mut key,
+                Some(&mut disposition as *mut _)
+            ).ok()?;
             RegistryKeyGuard(key)
         };
         
@@ -699,19 +722,13 @@ fn create_registry_keys() -> Result<()> {
         RegSetValueExW(inproc_key.get(), w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
 
         // Associate with .svg files
-        let svg_key = {
-            let mut key = HKEY::default();
-            RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut key).ok()?;
-            RegistryKeyGuard(key)
-        };
+        let svg_key = RegistryKeyGuard(HKEY_CLASSES_ROOT)
+            .create_subkey(&w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"))?;
         RegSetValueExW(svg_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         // Associate with .svgz files
-        let svgz_key = {
-            let mut key = HKEY::default();
-            RegCreateKeyW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), &mut key).ok()?;
-            RegistryKeyGuard(key)
-        };
+        let svgz_key = RegistryKeyGuard(HKEY_CLASSES_ROOT)
+            .create_subkey(&w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"))?;
         RegSetValueExW(svgz_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
 
         Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None);
@@ -751,7 +768,23 @@ impl Drop for RegistryKeyGuard {
 impl RegistryKeyGuard {
     fn create_subkey(&self, name: &PCWSTR) -> Result<RegistryKeyGuard> {
         let mut key = HKEY::default();
-        unsafe { RegCreateKeyW(self.0, *name, &mut key).ok()? };
+        let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
+        unsafe {
+            RegCreateKeyExW(
+                self.0,
+                *name,
+                None,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                WRITE_FLAGS,
+                None,
+                &mut key,
+                Some(&mut disposition as *mut _)
+            ).ok()?;
+            if key.is_invalid() {
+                return Err(Error::new(E_FAIL, "RegCreateKeyExW returned null handle"));
+            }
+        }
         Ok(RegistryKeyGuard(key))
     }
     
