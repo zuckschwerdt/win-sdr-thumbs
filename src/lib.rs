@@ -11,6 +11,7 @@ use std::{
             AtomicU32, 
             Ordering
         }, 
+        Arc,
         Mutex
     },
 };
@@ -386,7 +387,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
 
 #[implement(Shell::PropertiesSystem::IInitializeWithStream, Shell::IThumbnailProvider)]
 struct ThumbnailProvider {
-    svg_data: Mutex<Option<Vec<u8>>>,
+    svg_data: Mutex<Option<Arc<Vec<u8>>>>,
 }
 
 impl Default for ThumbnailProvider {
@@ -409,12 +410,6 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
     fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
         ffi_guard!(Result<()>, {
             //log_message("Initialize: Entered.");
-
-            // Safely check for null pointer first, then dereference to get the Option
-            if pstream.is_null() {
-                //log_message("Initialize: Error - Stream pointer is null.");
-                return Err(E_INVALIDARG.into());
-            }
 
             // Now safely dereference and pattern match on the Option
             match &*pstream {
@@ -446,9 +441,8 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                         buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                     }
                     
-                    // Safely lock the mutex. If it's poisoned, return an error instead of panicking.
-                    let mut data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
-                    *data_guard = Some(buffer);
+                    // Directly assign to the mutex without temporary variable
+                    *self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::new(buffer));
                     
                     //log_message("Initialize: Succeeded.");
                     Ok(())
@@ -469,14 +463,21 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
         ffi_guard!(Result<()>, {
             //log_message("GetThumbnail: Entered.");
 
-            // Clone the SVG data and release the mutex before rendering to prevent deadlocks
+            // Initialize output parameters to safe defaults (COM contract requirement)
+            // pdwalpha is set to UNKNOWN for all failure cases, only changed to ARGB on success
+            unsafe {
+                *phbmp = Gdi::HBITMAP(std::ptr::null_mut());
+                *pdwalpha = Shell::WTSAT_UNKNOWN;
+            }
+
+            // Clone the Arc (cheap pointer copy) and release the mutex before rendering to prevent deadlocks
             let svg_data = {
                 let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
                 
                 match data_guard.as_ref() {
                     Some(data) => {
                         //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
-                        data.clone() // Clone the data to release the lock
+                        Arc::clone(data) // Clone the Arc (cheap pointer copy)
                     }
                     None => {
                         //log_message("GetThumbnail: Error - SVG data was not initialized.");
@@ -485,7 +486,7 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                 }
             }; // Mutex lock is released here
 
-            match render_svg_to_hbitmap(&svg_data, cx, cx) {
+            match render_svg_to_hbitmap(&svg_data[..], cx, cx) {
                 Ok(hbitmap) => {
                     //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
                     unsafe {
