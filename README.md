@@ -31,6 +31,8 @@ A high-performance thumbnail provider for Windows that generates explorer thumbn
   </tbody>
 </table>
 
+Note: Also see [current limitations](#current-limitations) section
+
 ## Screenshot
 <p align="center">
 <img width=650 src=https://github.com/user-attachments/assets/67050436-809e-437b-9c17-4cdeeb386450>
@@ -51,7 +53,7 @@ A high-performance thumbnail provider for Windows that generates explorer thumbn
 
 ## Current Limitations:
 - Currently, some SVGs may render as black squares or as being filled completely black
-  - Such SVGs contain properties not [supported by the Direct2D API](https://learn.microsoft.com/en-us/windows/win32/direct2d/svg-support) which this extension uses, but I'm working on workarounds
+  - Such SVGs contain properties not [supported by the Direct2D API](https://learn.microsoft.com/en-us/windows/win32/direct2d/svg-support) which this extension uses, but I'm working on workarounds for full support
 - The most notable limitations seem to be lack of support for:
   - CSS `<style>` blocks within a separate dedicated `<def>` block
   - `<Text>` elements
