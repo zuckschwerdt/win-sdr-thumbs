@@ -49,6 +49,15 @@ A high-performance thumbnail provider for Windows that generates explorer thumbn
     regsvr32 win_svg_thumbs.dll
     ```
 
+## Current Limitations:
+- Currently, some SVGs may render as black squares or as being filled completely black
+  - Such SVGs contain properties not [supported by the Direct2D API](https://learn.microsoft.com/en-us/windows/win32/direct2d/svg-support) which this extension uses, but I'm working on workarounds
+- The most notable limitations seem to be lack of support for:
+  - CSS `<style>` blocks within a separate dedicated `<def>` block
+  - `<Text>` elements
+- **Upcoming Improvements**: For the CSS style blocks at least, the API *does* support in-line style strings. So I have a plan that where I can do some simple parsing and just copy the the styles from the `<def>` block to their individual attributes.
+  - This would fix a vast majority of the current failed renderings (which are already relatively uncommon)
+
 ## Usage
 
 Once the DLL is registered, Windows Explorer will automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
