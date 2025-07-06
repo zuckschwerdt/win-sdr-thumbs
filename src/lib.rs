@@ -682,12 +682,27 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         
         // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
         if !dib_data.is_null() {
+            // SECURITY LOGIC: Always promote pitch * height to u64 before casting to usize.
+            // This prevents integer overflow if a malicious or buggy driver returns a huge pitch.
+            // Without this, a wrapped value could create a dangerously small slice, leading to a heap buffer overflow when copying rows below.
+            // Do not remove this check: it is critical for safe memory access.
+            let source_buffer_size_64 = (mapped_rect.pitch as u64) * (height as u64);
+
+            // On 32-bit systems, usize is 32 bits. Ensure the calculated size fits.
+            if source_buffer_size_64 > usize::MAX as u64 {
+                // Defensive: If this ever triggers, the driver is returning a bogus pitch, or there is something deeply wrong with the D2D bitmap.
+                return Err(Error::new(E_FAIL, "Calculated source buffer size exceeds addressable memory."));
+            }
+            let source_buffer_size = source_buffer_size_64 as usize;
+
             // Create safe slices from the raw pointers.
-            let source_data: &[u8] = unsafe { std::slice::from_raw_parts(mapped_rect.bits, (mapped_rect.pitch * height) as usize) };
-            let dest_data: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) };
-            
-            // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent
-            // garbage data in any padding bytes left over from a stride mismatch.
+            let source_data: &[u8] = unsafe { 
+                std::slice::from_raw_parts(mapped_rect.bits, source_buffer_size) 
+            };
+            let dest_data: &mut [u8] = unsafe { 
+                std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) 
+            };
+            // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent garbage data in any padding bytes left over from a stride mismatch.
             dest_data.fill(0);
 
             // Now, copy the image data.
