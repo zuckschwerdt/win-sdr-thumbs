@@ -7,6 +7,8 @@
 Windows API Code Pack 1.1
 TestSvgFiles
 *_sample.bmp
+**/test.svg
 
 /target
+/Testing/target
 *.lock

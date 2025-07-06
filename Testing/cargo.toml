@@ -1,23 +1,17 @@
-[workspace]
-members = [
-    ".",
-    "Testing",
-    # "win_svg_thumbs"
-]
-
 [package]
-name = "win_svg_thumbs"
-version = "1.7.0"
+name = "testing"
+version = "0.1.0"
 edition = "2021"
 
-[profile.release]
-# Include debug symbols
-debug = true
 
-[lib]
-crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "testing"
+path = "src/main.rs"
+windows_subsystem = "windows"
 
 [dependencies]
+win_svg_thumbs = { path = ".." }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -38,13 +32,7 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_System_SystemServices",
     "Win32_System_Registry",
-    "Win32_Security"
+    "Win32_Security",
+    "Win32_UI",
+    "Win32_System_LibraryLoader"
 ]}
-
-windows-core = "0.61"
-windows-registry = "0.5"
-
-# Unused but good to remember
-#windows-sys = { version = "0.60", features = ["Win32_System_Registry","Win32_Security"]}
-#windows-implement = "0.61"
-#windows-strings = "0.4"
