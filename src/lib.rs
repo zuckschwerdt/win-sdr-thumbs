@@ -263,6 +263,35 @@ impl<'a> Drop for D2D1DrawGuard<'a> {
     }
 }
 
+// RAII wrapper for VARIANT - automatically calls VariantClear when dropped
+struct VariantGuard(VARIANT);
+
+impl VariantGuard {
+    fn new() -> Self {
+        Self(VARIANT::default())
+    }
+}
+
+impl Drop for VariantGuard {
+    fn drop(&mut self) {
+        // This is safe to call even on a default/zeroed VARIANT
+        unsafe { let _ = VariantClear(&mut self.0); }
+    }
+}
+
+impl std::ops::Deref for VariantGuard {
+    type Target = VARIANT;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for VariantGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// Parses CSS text content and returns a list of class names and their concatenated style properties.
 fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
     let mut style_list: Vec<(String, String)> = Vec::new();
@@ -394,100 +423,143 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> String {
 /// Applies inline styles to SVG elements based on their class attributes using the MSXML parser.
 /// It loads the SVG, finds elements by class, applies the provided styles, and returns the modified SVG data.
 fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) -> Result<Vec<u8>> {
-    // If no styles were found, there's nothing to do. Return the original data to avoid
-    // the overhead of parsing and re-serializing the XML.
+    // Skip it all if there are no styles to apply.
     if style_map.is_empty() {
         return Ok(svg_data.to_vec());
     }
 
-    // MSXML is a COM component, so we need to ensure COM is initialized on this thread.
+    // MSXML is a COM (Component Object Model) library. Any thread that uses COM must first initialize it.
+    // The `ComGuard` is an RAII wrapper that calls `CoInitializeEx` on creation and `CoUninitialize` on drop, ensuring cleanup.
     let _com_guard = ComGuard::new()?;
 
-    // Create an instance of the MSXML DOM Document object.
+    // This creates an instance of the MSXML6 DOM Document object, which is our XML parser.
+    // `CoCreateInstance` is the standard COM function for creating objects from a CLSID (Class ID).
     let dom: MsXml::IXMLDOMDocument2 = unsafe { Com::CoCreateInstance(&DOMDocument60, None, Com::CLSCTX_INPROC_SERVER)? };
     
     // --- Load SVG data into the DOM document ---
-    let safe_array = unsafe { Ole::SafeArrayCreateVector(windows::Win32::System::Variant::VARENUM(VT_UI1.0 as u16), 0, svg_data.len() as u32) };
-    if safe_array.is_null() {
-        return Err(Error::new(E_FAIL, "Failed to create SafeArray"));
-    }
+
+    // `IStream` is a standard COM interface for streamable data, behaving like an in-memory file.
+    let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }
+        .ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream for MSXML"))?;
     
-    let mut p_data: *mut std::ffi::c_void = std::ptr::null_mut();
-    unsafe { Ole::SafeArrayAccessData(safe_array, &mut p_data)? };
-    unsafe { std::ptr::copy_nonoverlapping(svg_data.as_ptr(), p_data as *mut u8, svg_data.len()) };
-    unsafe { Ole::SafeArrayUnaccessData(safe_array)? };
-
-    let mut variant_data = VARIANT::default();
+    // The `dom.load` method is particular and requires its input to be a `VARIANT` (a special COM struct that can hold many different types of data.)
+    // We use our `VariantGuard` to ensure `VariantClear` is called, which will correctly release the COM object we're about to put in it.
+    let mut stream_variant = VariantGuard::new();
     unsafe {
-        (*variant_data.Anonymous.Anonymous).vt = VT_ARRAY | VT_UI1;
-        (*variant_data.Anonymous.Anonymous).Anonymous.parray = safe_array;
+        // Get a mutable reference to the anonymous union inside the `VARIANT` struct.
+        let v = &mut stream_variant.Anonymous.Anonymous;
+        // Set variant type tag to `VT_UNKNOWN` -- it holds a generic COM interface pointer (`IUnknown`).
+        v.vt = VT_UNKNOWN;
+        // Transfer ownership of the `IStream` COM object to the `VARIANT`.
+        // `stream.into()` converts the `IStream` smart pointer into its base `IUnknown` smart pointer.
+        // `std::mem::ManuallyDrop::new` is CRITICAL: it prevents Rust from calling `Release` on the `stream` variable when it goes out of scope.
+        // We have given ownership to the `VARIANT`, so the `VariantGuard` is now responsible for its cleanup. This prevents a double-release crash.
+        v.Anonymous.punkVal = std::mem::ManuallyDrop::new(Some(stream.into()));
     }
 
-    let success = unsafe { dom.load(&variant_data)? };
+    // The MSXML parser will read the SVG data directly from our in-memory stream.
+    let success = unsafe { dom.load(&stream_variant)? };
+    // For `dom.load`, success is specifically indicated by `VARIANT_TRUE` (-1), not just `S_OK` (0).
     if success != VARIANT_TRUE {
         return Err(Error::new(E_FAIL, "MSXML failed to load SVG data. It may be malformed."));
     }
 
     // --- Find elements with 'class' attribute and apply styles inline ---
+
+    // `BSTR` is a length-prefixed, null-terminated wide string used by COM.
+    let bstr_class = BSTR::from("class");
+    let bstr_style = BSTR::from("style");
+
+    // `selectNodes` uses an XPath query to find all elements in the document that have a "class" attribute.
+    // This returns a collection of nodes that we can iterate over.
     let tagged_nodes: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from("//*[@class]"))? };
     for i in 0..unsafe { tagged_nodes.length()? } {
         if let Ok(node) = unsafe { tagged_nodes.get_item(i) } {
+            // A node could be a comment, text, etc. We only care about elements, so we try to cast it.
+            // `cast` is a safe way to perform `QueryInterface` in `windows-rs`.
             if let Ok(element) = node.cast::<IXMLDOMElement>() {
-                if let Ok(class_variant) = unsafe { element.getAttribute(&BSTR::from("class")) } {
-                    let mut class_buffer = vec![0u16; 256];
-                    let class_str = if unsafe { VariantToString(&class_variant, &mut class_buffer) }.is_ok() {
-                        String::from_utf16_lossy(&class_buffer[..class_buffer.iter().position(|&x| x == 0).unwrap_or(class_buffer.len())])
-                    } else {
-                        String::new()
+                // Try to get the 'class' attribute from the current element.
+                if let Ok(class_variant_raw) = unsafe { element.getAttribute(&bstr_class) } {
+                    // `getAttribute` returns a new `VARIANT` which we now own. The guard ensures it's cleaned up.
+                    let class_variant = VariantGuard(class_variant_raw);
+
+                    let class_str = unsafe {
+                        // We must check that the VARIANT actually contains a string (`BSTR`).
+                        if (*class_variant.Anonymous.Anonymous).vt == VT_BSTR {
+                            // This is the safest way to convert a `BSTR` inside a `VARIANT` to a Rust `String`.
+                            // `(*...bstrVal)` gets the raw `BSTR` pointer from the `VARIANT`'s union. It is wrapped in `ManuallyDrop` by the bindings.
+                            // We dereference it (`*`) to get a `&[u16]` slice of the raw string data without taking ownership.
+                            // `String::from_utf16_lossy` then creates a new, Rust-owned `String` by *copying* the data from that slice.
+                            // The original `BSTR` remains owned by the `VARIANT` and will be freed by the `VariantGuard`.
+                            String::from_utf16_lossy(&(*class_variant.Anonymous.Anonymous).Anonymous.bstrVal)
+                        } else {
+                            String::new()
+                        }
                     };
 
+                    // If there's no class string, there's nothing to do for this element.
                     if class_str.is_empty() { continue; }
 
+                    // This string will hold all the CSS rules for all classes on this element.
                     let mut combined_properties = String::new();
+                    // An element can have multiple classes, e.g., `class="cls-1 cls-2"`. We split by whitespace to handle them all.
                     for class_name in class_str.split_whitespace() {
+                        // Look up the current class name in our map of styles parsed from the `<style>` tag.
                         if let Some((_key, style_properties)) = style_map.iter().find(|(key, _)| key == class_name) {
+                            // If found, append its CSS rules to our combined string.
                             combined_properties.push_str(style_properties);
                         }
                     }
 
+                    // Only proceed if we actually found any styles to apply for the classes on this element.
                     if !combined_properties.is_empty() {
                         let mut existing_style = String::new();
-                        if let Ok(style_variant) = unsafe { element.getAttribute(&BSTR::from("style")) } {
-                            if unsafe { (*style_variant.Anonymous.Anonymous).vt } != VT_NULL {
-                                let mut style_buffer = vec![0u16; 1024];
-                                if unsafe { VariantToString(&style_variant, &mut style_buffer) }.is_ok() {
-                                    existing_style = String::from_utf16_lossy(&style_buffer[..style_buffer.iter().position(|&x| x == 0).unwrap_or(style_buffer.len())]);
-                                    if !existing_style.is_empty() && !existing_style.ends_with(';') {
-                                        existing_style.push(';');
-                                    }
+                        // Check if the element *already* has an inline `style="..."` attribute.
+                        if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
+                            let style_variant = VariantGuard(style_variant_raw);
+                            // Also use the safe BSTR-to-String conversion for the style attribute.
+                            if unsafe { (*style_variant.Anonymous.Anonymous).vt == VT_BSTR } {
+                                existing_style = unsafe {
+                                    String::from_utf16_lossy(&(*style_variant.Anonymous.Anonymous).Anonymous.bstrVal)
+                                };
+                                // To preserve existing styles, we need to append them. Ensure there's a semicolon separator.
+                                if !existing_style.is_empty() && !existing_style.ends_with(';') {
+                                    existing_style.push(';');
                                 }
                             }
                         }
 
+                        // Combine the new styles from the CSS classes with any pre-existing inline styles.
+                        // We prepend our new styles so that existing inline styles can override them if needed, which is standard CSS behavior.
                         let final_style = format!("{}{}", combined_properties, existing_style);
+                        // Create a new BSTR from our final combined Rust String.
                         let bstr = BSTR::from(final_style);
-                        let mut variant_value = VARIANT::default();
+                        // We need to put this new BSTR into a VARIANT to pass it to `setAttribute`.
+                        let mut variant_value = VariantGuard::new();
                         unsafe {
                             let v = &mut variant_value.Anonymous.Anonymous;
                             v.vt = VT_BSTR;
+                            // Again, use `ManuallyDrop` to transfer ownership of the `bstr` to the `VARIANT`, preventing a double-free.
                             v.Anonymous.bstrVal = std::mem::ManuallyDrop::new(bstr);
                         }
 
-                        let _ = unsafe { element.setAttribute(&BSTR::from("style"), &variant_value) };
-                        unsafe { VariantClear(&mut variant_value)? };
+                        // Finally, set the 'style' attribute on the element with our new, combined style string.
+                        let _ = unsafe { element.setAttribute(&bstr_style, &variant_value) };
                     }
                 }
             }
         }
     }
 
-    // Serialize the modified DOM back to an XML string.
+    // After the loop has modified the DOM in memory, serialize the entire document back into a BSTR string.
     let modified_xml_bstr = unsafe { dom.xml()? };
+    // The `windows::core::BSTR` type is a smart pointer that will auto-free the string.
     let modified_xml_string = modified_xml_bstr.to_string();
 
     //DEBUG print the modified XML string log
     // log_message(modified_xml_string.as_str());
 
+    // Convert the final string to a byte vector and return it.
     Ok(modified_xml_string.into_bytes())
 }
 
