@@ -571,19 +571,26 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // Clear to transparent black
             unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
             
-            // Phase 1: Manually parse styles from the raw SVG data.
+            // Manually parse styles from the raw SVG data to look for <style> tags within <defs>
+            // It will quickly check if there are any <def>, then <style> tags, and extract the CSS content if so, otherwise return an empty string to avoid expensive parsing.
             let css_content = extract_css_from_svg_data(svg_data);
-            let style_map = parse_css_rules(&css_content);
-            // log_message(&format!("Style list contents: {:?}", style_map));
 
-            // Preprocess the SVG to inline all CSS styles from the map.
-            // This returns a new SVG data buffer with styles applied as inline `style` attributes.
-            let processed_svg_data = preprocess_svg_with_msxml(svg_data, &style_map)?;
+            // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
+            let processed_svg_data = if css_content.trim().is_empty() {
+                // No CSS to process, we can use the original SVG data.
+                // Since the `else` branch returns an owned Vec on success, we convert the original slice to a Vec here to keep the types consistent.
+                svg_data.to_vec()
+            } else {
+                // CSS content was found, so proceed with the full processing pipeline.
+                let style_map = parse_css_rules(&css_content);
+                // Preprocess the SVG to inline all CSS styles from the map. This returns a new SVG data buffer with styles applied as inline `style` attributes.
+                preprocess_svg_with_msxml(svg_data, &style_map)?
+            };
 
-            // Load the PROCESSED svg data into a memory stream.
+            // Load the (potentially processed) svg data into a memory stream.
             let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(&processed_svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
             
-            // Create the SVG document from the stream of PROCESSED SVG data.
+            // Create the SVG document from the stream of processed SVG data.
             let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
                 &stream,
                 D2D_SIZE_F { 
@@ -591,8 +598,6 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
                     height: height as f32
                 }
             ) }?;
-            
-            // Phase 2 is no longer needed as styles are inlined in the data stream.
             
             // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
             if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
