@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     ffi::OsStr,
     // fs::OpenOptions,
     // io::Write,
@@ -287,51 +288,116 @@ impl std::ops::DerefMut for VariantGuard {
 
 /// Parses CSS text content and returns a list of class names and their concatenated style properties.
 fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
-    let mut style_list: Vec<(String, String)> = Vec::new();
-    
-    // Clean the input string: remove leading/trailing whitespace and control characters,
-    // which should get rid of the junk data you're seeing from the buffer.
-    let cleaned_content = remove_css_comments(css_content.trim());
-    
-    // Split by '}' to get individual rules
-    let rules: Vec<&str> = cleaned_content.split('}').collect();
-    
-    for rule in rules {
-        let rule = rule.trim();
-        if rule.is_empty() {
-            continue;
-        }
-        
-        // Find the opening brace to separate selectors from properties
-        if let Some(brace_pos) = rule.find('{') {
-            let selectors_part = rule[..brace_pos].trim();
-            let properties_part = rule[brace_pos + 1..].trim();
-            
-            // Split selectors by comma for grouped rules like ".cls-1, .cls-2"
-            let selectors: Vec<&str> = selectors_part.split(',').collect();
-            
-            for selector in selectors {
-                let selector = selector.trim();
-                
-                // We only care about class selectors (starting with '.')
-                if let Some(class_name) = selector.strip_prefix('.') {
-                    let class_name = class_name.trim().to_string();
-                    let normalized_properties = normalize_css_properties(properties_part);
+    // Helper to find the matching closing brace, aware of strings and nested braces.
+    // `s` is the full string, `start_pos` is the byte index of the opening brace '{'.
+    // Returns the byte index of the matching '}'.
+    fn find_matching_brace(s: &str, start_pos: usize) -> Option<usize> {
+        let mut level = 1;
+        let mut in_string: Option<char> = None;
+        let mut is_escaped = false;
 
-                    // Find if this class already exists in our list
-                    if let Some((_key, existing_styles)) = style_list.iter_mut().find(|(key, _)| key == &class_name) {
-                        // If yes, append the new properties
-                        existing_styles.push_str(&normalized_properties);
-                    } else {
-                        // If no, add a new entry to the list
-                        style_list.push((class_name, normalized_properties));
-                    }
+        // Iterate from the character after the opening brace.
+        let mut chars = s[start_pos + 1..].char_indices();
+
+        while let Some((i, ch)) = chars.next() {
+            if is_escaped {
+                is_escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                is_escaped = true;
+                continue;
+            }
+
+            if let Some(quote) = in_string {
+                if ch == quote {
+                    in_string = None;
+                }
+            } else {
+                match ch {
+                    '\'' | '"' => in_string = Some(ch),
+                    '{' => level += 1,
+                    '}' => {
+                        level -= 1;
+                        if level == 0 {
+                            // i is the byte index within the slice s[start_pos + 1..]
+                            // The absolute index is start_pos + 1 + i
+                            return Some(start_pos + 1 + i);
+                        }
+                    },
+                    _ => {}
                 }
             }
         }
+        None
+    }
+
+    // SECURITY: Use a HashMap to store styles during parsing. This provides O(1) amortized
+    // lookup time and prevents a Denial of Service attack where a malicious CSS with thousands
+    // of rules for the same class name would cause O(N^2) behavior in a Vec-based approach.
+    let mut style_map: HashMap<String, String> = HashMap::new();
+    
+    // Clean the input string: remove leading/trailing whitespace and control characters.
+    let cleaned_content = remove_css_comments(css_content.trim());
+    
+    // Use an iterative approach with a heap-allocated stack to prevent stack overflow DoS.
+    let mut work_stack: Vec<&str> = vec![&cleaned_content];
+    const MAX_DEPTH: usize = 256; // Defense-in-depth against extreme nesting causing memory exhaustion.
+
+    while let Some(current_css) = work_stack.pop() {
+        let mut cursor = 0;
+        while cursor < current_css.len() {
+            // Find the next rule block, which starts with '{'
+            let open_brace_pos = match current_css[cursor..].find('{') {
+                Some(pos) => cursor + pos,
+                None => break, // No more rules in this block
+            };
+
+            let selectors_part = &current_css[cursor..open_brace_pos];
+
+            // Find the matching closing brace to define the rule's scope
+            let close_brace_pos = match find_matching_brace(current_css, open_brace_pos) {
+                Some(pos) => pos,
+                None => break, // Unmatched brace, stop parsing this block
+            };
+
+            let properties_part = &current_css[open_brace_pos + 1 .. close_brace_pos];
+
+            // Check if it's an at-rule (e.g., @media, @keyframes)
+            if selectors_part.trim().starts_with('@') {
+                // It's a nested block. Instead of recursing, push its contents onto the
+                // work stack to be processed iteratively.
+                if work_stack.len() < MAX_DEPTH {
+                    work_stack.push(properties_part);
+                }
+            } else {
+                // It's a standard rule; process its selectors.
+                for selector in selectors_part.split(',') {
+                    let selector = selector.trim();
+                    
+                    // We only care about class selectors (starting with '.')
+                    if let Some(class_name) = selector.strip_prefix('.') {
+                        let class_name = class_name.trim();
+                        if !class_name.is_empty() {
+                            let normalized_properties = normalize_css_properties(properties_part);
+
+                            // Use HashMap::entry for efficient O(1) amortized lookup and insertion.
+                            style_map
+                                .entry(class_name.to_string())
+                                .or_default()
+                                .push_str(&normalized_properties);
+                        }
+                    }
+                }
+            }
+
+            // Move cursor to the position after the current rule block
+            cursor = close_brace_pos + 1;
+        }
     }
     
-    style_list
+    // Convert the map to the Vec format expected by the caller.
+    style_map.into_iter().collect()
 }
 
 /// Removes CSS comments from the input string.
@@ -363,9 +429,7 @@ fn normalize_css_properties(properties: &str) -> String {
     let mut result = String::new();
     
     // Split by semicolon and clean up each property
-    let props: Vec<&str> = properties.split(';').collect();
-    
-    for prop in props {
+    for prop in properties.split(';') {
         let prop = prop.trim();
         if !prop.is_empty() {
             result.push_str(prop);
@@ -378,39 +442,47 @@ fn normalize_css_properties(properties: &str) -> String {
     result
 }
 
-/// Parses raw SVG data to extract CSS from <style> tags found within a <defs> block.
-/// This avoids the unreliable ID2D1SvgElement DOM traversal for styles.
+/// Extracts CSS content from all <style> tags within an SVG using the MSXML parser.
 /// Returns a single string containing all found CSS rules.
-fn extract_css_from_svg_data(svg_data: &[u8]) -> String {
-    let svg_string = String::from_utf8_lossy(svg_data);
-    let mut css_content = String::new();
+fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<String> {
+    // MSXML is a COM library, so COM must be initialized on the current thread.
+    let _com_guard = ComGuard::new()?;
 
-    // Find the <defs> block first. We only care about styles inside it.
-    if let Some(defs_start) = svg_string.find("<defs") {
-        if let Some(defs_end) = svg_string[defs_start..].find("</defs>") {
-            let defs_block_content = &svg_string[defs_start..defs_start + defs_end];
-            
-            // Now, find all <style> tags within that block.
-            let mut current_pos = 0;
-            while let Some(style_start_tag) = defs_block_content[current_pos..].find("<style") {
-                let style_start_abs = current_pos + style_start_tag;
-                if let Some(style_content_start) = defs_block_content[style_start_abs..].find('>') {
-                    let style_content_start_abs = style_start_abs + style_content_start + 1;
-                    if let Some(style_content_end) = defs_block_content[style_content_start_abs..].find("</style>") {
-                        let style_content_end_abs = style_content_start_abs + style_content_end;
-                        
-                        let content = &defs_block_content[style_content_start_abs..style_content_end_abs];
-                        css_content.push_str(content);
-                        css_content.push('\n'); // Add a newline for separation.
-                        
-                        current_pos = style_content_end_abs;
-                    } else { break; } // No closing </style> tag found.
-                } else { break; } // No opening '>' found for style tag.
+    // Create an instance of the MSXML6 DOM Document object.
+    let dom: MsXml::IXMLDOMDocument2 = unsafe { Com::CoCreateInstance(&DOMDocument60, None, Com::CLSCTX_INPROC_SERVER)? };
+    
+    // Load the SVG data from an in-memory stream.
+    let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }
+        .ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream for CSS extraction"))?;
+    
+    let stream_unknown: IUnknown = stream.cast()?;
+    let stream_variant = VariantGuard(VARIANT::from(stream_unknown));
+
+    // The MSXML parser will read the SVG data directly from our in-memory stream.
+    let success = unsafe { dom.load(&stream_variant)? };
+    if success != VARIANT_TRUE {
+        // If loading fails, it might not be a valid XML/SVG. The original string-based parser was also lenient.
+        // Instead of failing the entire render, we'll treat this as "no CSS found" and return an empty string.
+        return Ok(String::new());
+    }
+
+    // Use a namespace-agnostic XPath query to find all <style> elements. This is necessary because
+    // most SVGs define a default namespace (xmlns="..."), which would cause a simple "//style" query to fail.
+    let style_nodes: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from("//*[local-name()='style']"))? };
+    
+    let mut combined_css = String::new();
+    for i in 0..unsafe { style_nodes.length()? } {
+        if let Ok(node) = unsafe { style_nodes.get_item(i) } {
+            // The .text property of a node gets the concatenated text content of the node and its children.
+            // For a <style> element, this is exactly the CSS code inside it.
+            if let Ok(css_bstr) = unsafe { node.text() } {
+                combined_css.push_str(&css_bstr.to_string());
+                combined_css.push('\n'); // Add a newline for separation.
             }
         }
     }
     
-    css_content
+    Ok(combined_css)
 }
 
 /// Applies inline styles to SVG elements based on their class attributes using the MSXML parser.
@@ -571,9 +643,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // Clear to transparent black
             unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
             
-            // Manually parse styles from the raw SVG data to look for <style> tags within <defs>
-            // It will quickly check if there are any <def>, then <style> tags, and extract the CSS content if so, otherwise return an empty string to avoid expensive parsing.
-            let css_content = extract_css_from_svg_data(svg_data);
+            // Use the MSXML parser to reliably extract CSS content from any <style> tags in the SVG.
+            let css_content = extract_css_from_svg_data(svg_data)?;
 
             // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
             let processed_svg_data = if css_content.trim().is_empty() {
@@ -884,24 +955,6 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     }
 }
 
-// // -------------- Logger ----------------
-// fn log_message(message: &str) {
-//     if let Ok(mut file) = std::fs::OpenOptions::new()
-//         .create(true)
-//         .append(true)
-//         .open("C:\\temp\\svg_thumb_log.txt") // Make sure C:\temp exists!
-//     {
-//         let time = std::time::SystemTime::now()
-//             .duration_since(std::time::UNIX_EPOCH)
-//             .unwrap_or_default()
-//             .as_secs();
-//         let _ = writeln!(file, "[{}] {}", time, message);
-//     }
-// }
-
-// fn log_message(message: &str) {
-//     println!("{}", message);
-// }
 
 // =================================================================
 //                      COM Class Factory
@@ -1214,3 +1267,25 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
         }
     })
 }
+
+
+// =================================================================
+
+// // -------------- Logger ----------------
+// fn log_message(message: &str) {
+//     if let Ok(mut file) = std::fs::OpenOptions::new()
+//         .create(true)
+//         .append(true)
+//         .open("C:\\temp\\svg_thumb_log.txt") // Make sure C:\temp exists!
+//     {
+//         let time = std::time::SystemTime::now()
+//             .duration_since(std::time::UNIX_EPOCH)
+//             .unwrap_or_default()
+//             .as_secs();
+//         let _ = writeln!(file, "[{}] {}", time, message);
+//     }
+// }
+
+// fn log_message(message: &str) {
+//     println!("{}", message);
+// }
