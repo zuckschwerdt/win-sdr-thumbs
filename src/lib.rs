@@ -605,20 +605,27 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             
             // Clear to transparent black
             unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
-            
-            // Use the MSXML parser to reliably extract CSS content from any <style> tags in the SVG.
-            let css_content = extract_css_from_svg_data(svg_data)?;
 
-            // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
-            let processed_svg_data = if css_content.trim().is_empty() {
-                // No CSS to process, we can use the original SVG data.
-                // Since the `else` branch returns an owned Vec on success, we convert the original slice to a Vec here to keep the types consistent.
+            // Check for GZIP magic number (0x1F 0x8B) to detect SVGZ files
+            let is_compressed = svg_data.len() >= 2 && svg_data[0] == 0x1F && svg_data[1] == 0x8B;
+
+            let processed_svg_data = if is_compressed {
+                // Skip CSS processing for compressed SVGZ files - Direct2D can handle them directly
                 svg_data.to_vec()
             } else {
-                // CSS content was found, so proceed with the full processing pipeline.
-                let style_map = parse_css_rules(&css_content);
-                // Preprocess the SVG to inline all CSS styles from the map. This returns a new SVG data buffer with styles applied as inline `style` attributes.
-                preprocess_svg_with_msxml(svg_data, &style_map)?
+                let css_content = extract_css_from_svg_data(svg_data)?;
+
+                // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
+                if css_content.trim().is_empty() {
+                    // No CSS to process, we can use the original SVG data.
+                    // Since the `else` branch returns an owned Vec on success, we convert the original slice to a Vec here to keep the types consistent.
+                    svg_data.to_vec()
+                } else {
+                    // CSS content was found, so proceed with the full processing pipeline.
+                    let style_map = parse_css_rules(&css_content);
+                    // Preprocess the SVG to inline all CSS styles from the map. This returns a new SVG data buffer with styles applied as inline `style` attributes.
+                    preprocess_svg_with_msxml(svg_data, &style_map)?
+                }
             };
 
             // Load the (potentially processed) svg data into a memory stream.
