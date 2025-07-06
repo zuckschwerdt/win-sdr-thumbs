@@ -273,6 +273,39 @@ impl Drop for VariantGuard {
     }
 }
 
+impl VariantGuard {
+    /// Safely attempts to get a clone of the BSTR from the VARIANT.
+    ///
+    /// Returns:
+    /// - `Ok(Some(BSTR))` if the variant is a `VT_BSTR`.
+    /// - `Ok(None)` if the variant is `VT_EMPTY` or `VT_NULL`.
+    /// - `Err` if the variant is of any other type.
+    pub fn try_as_bstr(&self) -> Result<Option<BSTR>> {
+        // This entire operation is unsafe because we are manually interpreting a C-style union.
+        unsafe {
+            // Access the variant type tag `vt` directly. It is already a `VARENUM` type, so no casting or construction is needed.
+            match self.0.Anonymous.Anonymous.vt {
+                VT_BSTR => {
+                    // It's a BSTR. The `bstrVal` field is valid.
+                    let bstr = &self.0.Anonymous.Anonymous.Anonymous.bstrVal;
+
+                    // The BSTR inside the VARIANT is wrapped in ManuallyDrop, meaning we don't have ownership. To return an owned BST that the caller can use, we must clone it.
+                    // The BSTR::clone() method correctly calls SysAllocString.
+                    Ok(Some((**bstr).clone()))
+                }
+                VT_EMPTY | VT_NULL => {
+                    // The attribute exists but is empty. This is a valid, non-error state. We represent this as `None`.
+                    Ok(None)
+                }
+                _ => {
+                    // The variant holds a different type (e.g., a number). This is an unexpected state for a 'style' attribute. We return an error to indicate this.
+                    Err(Error::new(E_INVALIDARG, "Variant was not a string type."))
+                }
+            }
+        }
+    }
+}
+
 impl std::ops::Deref for VariantGuard {
     type Target = VARIANT;
     fn deref(&self) -> &Self::Target {
@@ -518,12 +551,51 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
 
     // --- Find elements matching CSS selectors and apply styles inline ---
 
+    // ------------------- LOCAL FUNCTION -------------------
+    /// Checks if a string is a valid, simple CSS identifier safe for XPath.
+    /// This uses an allowlist approach, which is more secure than a blocklist.
+    /// It permits only alphanumeric characters, hyphens, and underscores,
+    /// which covers the vast majority of real-world class and tag names.
+    fn is_valid_css_identifier(s: &str) -> bool {
+        if s.is_empty() {
+            return false;
+        }
+
+        // Check the first character. According to CSS spec, it can't be a digit or a hyphen followed by a digit.
+        // We can be even stricter for security.
+        let mut chars = s.chars();
+        if let Some(first) = chars.next() {
+            // A simple, strict rule: must start with a letter or underscore.
+            if !(first.is_alphabetic() || first == '_') {
+                return false;
+            }
+        }
+
+        // Check the rest of the characters.
+        for c in chars {
+            if !(c.is_alphanumeric() || c == '-' || c == '_') {
+                return false; // Reject anything else.
+            }
+        }
+
+        true // If all checks pass, the identifier is considered safe.
+    }
+    // -------------------------------------------------------
+
     let bstr_style = BSTR::from("style");
 
     for (selector, properties_to_apply) in style_map {
         let xpath_query = if let Some(class_name) = selector.strip_prefix('.') {
+            // Sanitize class name using a strict allowlist.
+            if !is_valid_css_identifier(class_name) {
+                continue; // Skip invalid/malicious class names.
+            }
             format!("//*[contains(concat(' ', normalize-space(@class), ' '), ' {} ')]", class_name)
         } else {
+            // Sanitize tag name using a strict allowlist.
+            if !is_valid_css_identifier(selector) {
+                continue; // Skip invalid/malicious tag names.
+            }
             format!("//*[local-name()='{}']", selector)
         };
 
@@ -537,16 +609,16 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
                     // Check if the element *already* has an inline `style="..."` attribute.
                     if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
                         let style_variant = VariantGuard(style_variant_raw);
-                        // Also use the safe BSTR-to-String conversion for the style attribute.
-                        if unsafe { (*style_variant.Anonymous.Anonymous).vt == VT_BSTR } {
-                            existing_style = unsafe {
-                                String::from_utf16_lossy(&(*style_variant.Anonymous.Anonymous).Anonymous.bstrVal)
-                            };
+
+                        if let Ok(Some(bstr)) = style_variant.try_as_bstr() {
+                            // The conversion from BSTR to String is now safe.
+                            existing_style = bstr.to_string();
                             // To preserve existing styles, we need to append them. Ensure there's a semicolon separator.
                             if !existing_style.is_empty() && !existing_style.ends_with(';') {
                                 existing_style.push(';');
                             }
                         }
+                        // We don't need an `else` here. If try_as_bstr returns Err or Ok(None), existing_style remains an empty string, which is correct.
                     }
 
                     // Combine the new styles from the CSS rule with any pre-existing inline styles.
@@ -576,12 +648,12 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
     Ok(modified_xml_string.into_bytes())
 }
 
-pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<Gdi::HBITMAP> {
+pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
     // Encapsulate main rendering logic in a helper closure.
     // This makes it easier to catch any error, check if it's D2DERR_RECREATE_TARGET, poison the resources if needed, and then return the original error.
     let result = (|| -> Result<Gdi::HBITMAP> {
         // Early validation - avoid work for invalid sizes
-        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        if requested_width == 0 || requested_height == 0 || requested_width > 4096 || requested_height > 4096 {
             return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
         }
 
@@ -596,7 +668,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
             ..Default::default()
         };
-        let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+        let render_target_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width: requested_width, height: requested_height }, None, 0, &bitmap_props_rt) }?;
         
         // 3. Set target and draw the SVG
         unsafe { d2d_context.SetTarget(&render_target_bitmap) };
@@ -635,18 +707,31 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
                 &stream,
                 D2D_SIZE_F { 
-                    width: width as f32, 
-                    height: height as f32
+                    width: requested_width as f32, 
+                    height: requested_height as f32
                 }
             ) }?;
-            
+
             // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
             if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
                 // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
                 // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
                 unsafe {
+                    // DEBUG - Maybe useful later: Get the width and height attributes from the root element
+                    // let mut width_buffer = [0u16; 32]; // Buffer for width string
+                    // let mut height_buffer = [0u16; 32]; // Buffer for height string
+                    // let width_result = root_element.GetAttributeValue3(&BSTR::from("width"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut width_buffer);
+                    // let height_result = root_element.GetAttributeValue3(&BSTR::from("height"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut height_buffer);
+
+                    // Remove width, height and viewBox attributes if they exist
                     let _ = root_element.RemoveAttribute(w!("height"));
                     let _ = root_element.RemoveAttribute(w!("width"));
+                    // let _ = root_element.RemoveAttribute(w!("viewBox"));
+                    
+                    // DEBUG - Maybe useful later: How to set height, width and viewBox attributes on the root element
+                    // let _ = root_element.SetAttributeValue3(&BSTR::from("height"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &BSTR::from(height.to_string()));
+                    // let _ = root_element.SetAttributeValue3(&BSTR::from("width"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &BSTR::from(width.to_string()));
+                    // let _ = root_element.SetAttributeValue3(&BSTR::from("viewBox"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &BSTR::from(format!("0 0 {} {}", width, height)));
                 }
             }
             
@@ -660,7 +745,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
             Ok(unpremultiply_effect) => {
                 // Create a second render target bitmap for the UnPremultiply effect output
-                let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_rt) }?;
+                let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width: requested_width, height: requested_height }, None, 0, &bitmap_props_rt) }?;
                 
                 // Switch to the output bitmap as the target and begin a new draw session
                 unsafe { d2d_context.SetTarget(&output_bitmap) };
@@ -702,7 +787,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             bitmapOptions: D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             ..Default::default()
         };
-        let staging_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width, height }, None, 0, &bitmap_props_staging) }?;
+        let staging_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width: requested_width, height: requested_height }, None, 0, &bitmap_props_staging) }?;
         
         // 5. Copy from render target to staging bitmap (GPU -> CPU accessible D2D memory)
         // This copies the pixel data but it's still in D2D's memory space
@@ -714,7 +799,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
         // 7. Create the final GDI HBITMAP
         // This creates a separate GDI bitmap with its own memory buffer
         let bmi = Gdi::BITMAPINFO { bmiHeader: Gdi::BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32, biWidth: width as i32, biHeight: -(height as i32),
+            biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32, biWidth: requested_width as i32, biHeight: -(requested_height as i32),
             biPlanes: 1, biBitCount: 32, biCompression: Gdi::BI_RGB.0 as u32, ..Default::default()
         }, ..Default::default() };
 
@@ -727,7 +812,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // This prevents integer overflow if a malicious or buggy driver returns a huge pitch.
             // Without this, a wrapped value could create a dangerously small slice, leading to a heap buffer overflow when copying rows below.
             // Do not remove this check: it is critical for safe memory access.
-            let source_buffer_size_64 = (mapped_rect.pitch as u64) * (height as u64);
+            let source_buffer_size_64 = (mapped_rect.pitch as u64) * (requested_height as u64);
 
             // On 32-bit systems, usize is 32 bits. Ensure the calculated size fits.
             if source_buffer_size_64 > usize::MAX as u64 {
@@ -741,22 +826,22 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
                 std::slice::from_raw_parts(mapped_rect.bits, source_buffer_size) 
             };
             let dest_data: &mut [u8] = unsafe { 
-                std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (width * height * 4) as usize) 
+                std::slice::from_raw_parts_mut(dib_data.cast::<u8>(), (requested_width * requested_height * 4) as usize) 
             };
             // PRE-INITIALIZE the destination buffer to zero. This is the simplest way to prevent garbage data in any padding bytes left over from a stride mismatch.
             dest_data.fill(0);
 
             // Now, copy the image data.
-            if mapped_rect.pitch == (width * 4) {
+            if mapped_rect.pitch == (requested_width * 4) {
                 // Direct copy if stride matches.
                 dest_data.copy_from_slice(&source_data[..dest_data.len()]);
             } else {
                 // Copy row by row to handle stride differences.
-                let dest_stride: usize = (width * 4) as usize;
+                let dest_stride: usize = (requested_width * 4) as usize;
                 let source_stride: usize = mapped_rect.pitch as usize;
                 let row_copy_len = std::cmp::min(dest_stride, source_stride);
 
-                for y in 0..height as usize {
+                for y in 0..requested_height as usize {
                     let src_start: usize = y * source_stride;
                     let dest_start: usize = y * dest_stride;
                     
@@ -1010,7 +1095,7 @@ fn dll_release() {
 
 // This is our thumbnail provider's unique Class ID (CLSID).
 // Use a new GUID for your own projects!
-const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0x95724385_3234_4ea4_8086_3499F447884D);
+const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xa884a812_58fd_47d5_bda6_4fab4fabdcd9);
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -1078,56 +1163,32 @@ fn to_pcwstr(s: &str) -> Vec<u16> {
 
 fn create_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-    let dll_path: String = get_dll_path()?;
+    let dll_path = get_dll_path()?;
 
-    // Prepare string values outside unsafe block
-    let clsid_wide = to_pcwstr(&clsid_string);
-    let value = to_pcwstr("SVG Thumbnail Provider (Rust)");
-    let path_value = to_pcwstr(&dll_path);
-    let model_value = to_pcwstr("Apartment");
-    let clsid_value = to_pcwstr(&clsid_string);
+    // Create CLSID\{our-clsid}
+    let clsid_root_key = RegistryKeyGuard::create_root_key(HKEY_CLASSES_ROOT, &w!("CLSID"))?;
 
-    unsafe {
-        // Create CLSID\{our-clsid} - using RAII wrapper for automatic cleanup
-        let clsid_root_key = {
-            let mut key = HKEY::default();
-            let mut disposition = REG_CREATE_KEY_DISPOSITION(0);
-            RegCreateKeyExW(
-                HKEY_CLASSES_ROOT,
-                w!("CLSID"),
-                None,
-                None,
-                REG_OPTION_NON_VOLATILE,
-                WRITE_FLAGS,
-                None,
-                &mut key,
-                Some(&mut disposition as *mut _)
-            ).ok()?;
-            RegistryKeyGuard(key)
-        };
-        
-        let clsid_key = clsid_root_key.create_subkey(&PCWSTR(clsid_wide.as_ptr()))?;
-        RegSetValueExW(clsid_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(value.as_ptr() as *const u8, value.len() * 2))).ok()?;
+    let clsid_key = clsid_root_key.create_subkey(&PCWSTR(to_pcwstr(&clsid_string).as_ptr()))?;
+    clsid_key.set_string_value("", "SVG Thumbnail Provider (Rust)")?;
 
-        // Create CLSID\{our-clsid}\InprocServer32
-        let inproc_key = clsid_key.create_subkey(&w!("InprocServer32"))?;
-        RegSetValueExW(inproc_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(path_value.as_ptr() as *const u8, path_value.len() * 2))).ok()?;
-        RegSetValueExW(inproc_key.get(), w!("ThreadingModel"), Some(0), REG_SZ, Some(std::slice::from_raw_parts(model_value.as_ptr() as *const u8, model_value.len() * 2))).ok()?;
+    // Create CLSID\{our-clsid}\InprocServer32
+    let inproc_key = clsid_key.create_subkey(&w!("InprocServer32"))?;
+    inproc_key.set_string_value("", &dll_path)?;
+    inproc_key.set_string_value("ThreadingModel", "Apartment")?;
 
-        // Associate with .svg files by creating the key path explicitly in the correct registry view
-        let svg_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
-        let svg_shellex_key = svg_root_key.create_subkey(&w!("shellex"))?;
-        let svg_handler_key = svg_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-        RegSetValueExW(svg_handler_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
+    // Associate with .svg files
+    let svg_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
+    let svg_shellex_key = svg_root_key.create_subkey(&w!("shellex"))?;
+    let svg_handler_key = svg_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+    svg_handler_key.set_string_value("", &clsid_string)?;
 
-        // Associate with .svgz files
-        let svgz_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svgz"))?;
-        let svgz_shellex_key = svgz_root_key.create_subkey(&w!("shellex"))?;
-        let svgz_handler_key = svgz_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-        RegSetValueExW(svgz_handler_key.get(), PCWSTR::null(), Some(0), REG_SZ, Some(std::slice::from_raw_parts(clsid_value.as_ptr() as *const u8, clsid_value.len() * 2))).ok()?;
+    // Associate with .svgz files
+    let svgz_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svgz"))?;
+    let svgz_shellex_key = svgz_root_key.create_subkey(&w!("shellex"))?;
+    let svgz_handler_key = svgz_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+    svgz_handler_key.set_string_value("", &clsid_string)?;
 
-        Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None);
-    }
+    unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
 
     Ok(())
 }
@@ -1186,31 +1247,72 @@ impl RegistryKeyGuard {
                 &mut key,
                 Some(&mut disposition as *mut _)
             ).ok()?;
-            if key.is_invalid() {
-                return Err(Error::new(E_FAIL, "RegCreateKeyExW returned null handle"));
-            }
         }
+        if key.is_invalid() {
+            return Err(Error::new(E_FAIL, "RegCreateKeyExW returned null handle"));
+        }
+
         Ok(RegistryKeyGuard(key))
     }
     
-    fn get(&self) -> HKEY {
-        self.0
+    // fn get(&self) -> HKEY {
+    //     self.0
+    // }
+
+    fn create_root_key(hive: HKEY, name: &PCWSTR) -> Result<RegistryKeyGuard> {
+        let mut key = HKEY::default();
+        unsafe {
+            RegCreateKeyExW(
+                hive,
+                *name,
+                None,
+                None,
+                REG_OPTION_NON_VOLATILE,
+                WRITE_FLAGS,
+                None,
+                &mut key,
+                None
+            ).ok()?;
+        }
+        Ok(RegistryKeyGuard(key))
+    }
+
+    /// Sets a REG_SZ (string) value for this registry key.
+    /// The `name` can be an empty string to set the (Default) value.
+    fn set_string_value(&self, name: &str, value: &str) -> Result<()> {
+        // Convert name and value to null-terminated wide strings (Vec<u16>)
+        let wide_name = to_pcwstr(name);
+        let wide_value = to_pcwstr(value);
+
+        // The size for RegSetValueExW must be in bytes, including the null terminator.
+        // to_pcwstr already adds the null terminator, so wide_value.len() is correct.
+        let value_size_bytes = (wide_value.len() * std::mem::size_of::<u16>()) as u32;
+
+        unsafe {
+            RegSetValueExW(
+                self.0,
+                PCWSTR(wide_name.as_ptr()),
+                None,
+                REG_SZ,
+                Some(std::slice::from_raw_parts(
+                    wide_value.as_ptr() as *const u8,
+                    value_size_bytes as usize,
+                )),
+            ).ok()?;
+        }
+        Ok(())
     }
 }
 
 fn delete_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-
-    // Prepare string values outside unsafe block
     let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
 
-    unsafe {
-        RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr())).ok()?;
-        RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
-        RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()?;
+    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr())).ok()? };
+    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()? };
+    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()? };
 
-        Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None)
-    }
+    unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
 
     Ok(())
 }
@@ -1240,6 +1342,54 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
 
 
 // =================================================================
+
+// fn serialize_svg_doc(svg_doc: &ID2D1SvgDocument) {
+//     //TESTING: Serialize the SVG document to inspect its contents with ID2D1SvgDocument::Serialize
+//     // Create a memory stream to capture the serialized SVG data
+//     if let Some(memory_stream) = unsafe { Shell::SHCreateMemStream(Some(&[])) } {
+//         // Serialize the SVG document
+//         let serialize_result = unsafe { svg_doc.Serialize(&memory_stream, None) };
+        
+//         if serialize_result.is_ok() {
+//             // Seek back to the beginning of the stream
+//             let mut new_position = 0u64;
+//             let seek_result = unsafe { 
+//                 memory_stream.Seek(0, Com::STREAM_SEEK_SET, Some(&mut new_position))
+//             };
+            
+//             if seek_result.is_ok() {
+//                 // Read the entire stream content
+//                 let mut buffer = Vec::new();
+//                 let mut chunk = vec![0u8; 4096];
+                
+//                 loop {
+//                     let mut bytes_read = 0u32;
+//                     let read_result = unsafe { 
+//                         memory_stream.Read(
+//                             chunk.as_mut_ptr() as *mut std::ffi::c_void, 
+//                             chunk.len() as u32, 
+//                             Some(&mut bytes_read)
+//                         ) 
+//                     };
+                    
+//                     if read_result.is_err() || bytes_read == 0 {
+//                         break;
+//                     }
+                    
+//                     buffer.extend_from_slice(&chunk[..bytes_read as usize]);
+//                 }
+                
+//                 // Convert to string for debugging
+//                 let serialized_svg = String::from_utf8_lossy(&buffer);
+//                 print!("{}", serialized_svg);
+//             } else {
+//                 print!("[DEBUG] Failed to seek to beginning of stream");
+//             }
+//         } else {
+//             print!("[DEBUG] Failed to serialize SVG document");
+//         }
+//     }
+// }
 
 // // -------------- Logger ----------------
 // fn log_message(message: &str) {
