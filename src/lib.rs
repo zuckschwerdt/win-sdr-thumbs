@@ -375,18 +375,14 @@ fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
                 for selector in selectors_part.split(',') {
                     let selector = selector.trim();
                     
-                    // We only care about class selectors (starting with '.')
-                    if let Some(class_name) = selector.strip_prefix('.') {
-                        let class_name = class_name.trim();
-                        if !class_name.is_empty() {
-                            let normalized_properties = normalize_css_properties(properties_part);
+                    if !selector.is_empty() {
+                        let normalized_properties = normalize_css_properties(properties_part);
 
-                            // Use HashMap::entry for efficient O(1) amortized lookup and insertion.
-                            style_map
-                                .entry(class_name.to_string())
-                                .or_default()
-                                .push_str(&normalized_properties);
-                        }
+                        // Use HashMap::entry for efficient O(1) amortized lookup and insertion.
+                        style_map
+                            .entry(selector.to_string())
+                            .or_default()
+                            .push_str(&normalized_properties);
                     }
                 }
             }
@@ -520,82 +516,49 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
         return Err(Error::new(E_FAIL, "MSXML failed to load SVG data. It may be malformed."));
     }
 
-    // --- Find elements with 'class' attribute and apply styles inline ---
+    // --- Find elements matching CSS selectors and apply styles inline ---
 
-    // `BSTR` is a length-prefixed, null-terminated wide string used by COM.
-    let bstr_class = BSTR::from("class");
     let bstr_style = BSTR::from("style");
 
-    // `selectNodes` uses an XPath query to find all elements in the document that have a "class" attribute.
-    // This returns a collection of nodes that we can iterate over.
-    let tagged_nodes: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from("//*[@class]"))? };
-    for i in 0..unsafe { tagged_nodes.length()? } {
-        if let Ok(node) = unsafe { tagged_nodes.get_item(i) } {
-            // A node could be a comment, text, etc. We only care about elements, so we try to cast it.
-            // `cast` is a safe way to perform `QueryInterface` in `windows-rs`.
-            if let Ok(element) = node.cast::<IXMLDOMElement>() {
-                // Try to get the 'class' attribute from the current element.
-                if let Ok(class_variant_raw) = unsafe { element.getAttribute(&bstr_class) } {
-                    // `getAttribute` returns a new `VARIANT` which we now own. The guard ensures it's cleaned up.
-                    let class_variant = VariantGuard(class_variant_raw);
+    for (selector, properties_to_apply) in style_map {
+        let xpath_query = if let Some(class_name) = selector.strip_prefix('.') {
+            format!("//*[contains(concat(' ', normalize-space(@class), ' '), ' {} ')]", class_name)
+        } else {
+            format!("//*[local-name()='{}']", selector)
+        };
 
-                    let class_str = unsafe {
-                        // We must check that the VARIANT actually contains a string (`BSTR`).
-                        if (*class_variant.Anonymous.Anonymous).vt == VT_BSTR {
-                            // This is the safest way to convert a `BSTR` inside a `VARIANT` to a Rust `String`.
-                            // `(*...bstrVal)` gets the raw `BSTR` pointer from the `VARIANT`'s union. It is wrapped in `ManuallyDrop` by the bindings.
-                            // We dereference it (`*`) to get a `&[u16]` slice of the raw string data without taking ownership.
-                            // `String::from_utf16_lossy` then creates a new, Rust-owned `String` by *copying* the data from that slice.
-                            // The original `BSTR` remains owned by the `VARIANT` and will be freed by the `VariantGuard`.
-                            String::from_utf16_lossy(&(*class_variant.Anonymous.Anonymous).Anonymous.bstrVal)
-                        } else {
-                            String::new()
-                        }
-                    };
-
-                    // If there's no class string, there's nothing to do for this element.
-                    if class_str.is_empty() { continue; }
-
-                    // This string will hold all the CSS rules for all classes on this element.
-                    let mut combined_properties = String::new();
-                    // An element can have multiple classes, e.g., `class="cls-1 cls-2"`. We split by whitespace to handle them all.
-                    for class_name in class_str.split_whitespace() {
-                        // Look up the current class name in our map of styles parsed from the `<style>` tag.
-                        if let Some((_key, style_properties)) = style_map.iter().find(|(key, _)| key == class_name) {
-                            // If found, append its CSS rules to our combined string.
-                            combined_properties.push_str(style_properties);
-                        }
-                    }
-
-                    // Only proceed if we actually found any styles to apply for the classes on this element.
-                    if !combined_properties.is_empty() {
-                        let mut existing_style = String::new();
-                        // Check if the element *already* has an inline `style="..."` attribute.
-                        if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
-                            let style_variant = VariantGuard(style_variant_raw);
-                            // Also use the safe BSTR-to-String conversion for the style attribute.
-                            if unsafe { (*style_variant.Anonymous.Anonymous).vt == VT_BSTR } {
-                                existing_style = unsafe {
-                                    String::from_utf16_lossy(&(*style_variant.Anonymous.Anonymous).Anonymous.bstrVal)
-                                };
-                                // To preserve existing styles, we need to append them. Ensure there's a semicolon separator.
-                                if !existing_style.is_empty() && !existing_style.ends_with(';') {
-                                    existing_style.push(';');
-                                }
+        let tagged_nodes: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from(xpath_query))? };
+        for i in 0..unsafe { tagged_nodes.length()? } {
+            if let Ok(node) = unsafe { tagged_nodes.get_item(i) } {
+                // A node could be a comment, text, etc. We only care about elements, so we try to cast it.
+                // `cast` is a safe way to perform `QueryInterface` in `windows-rs`.
+                if let Ok(element) = node.cast::<IXMLDOMElement>() {
+                    let mut existing_style = String::new();
+                    // Check if the element *already* has an inline `style="..."` attribute.
+                    if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
+                        let style_variant = VariantGuard(style_variant_raw);
+                        // Also use the safe BSTR-to-String conversion for the style attribute.
+                        if unsafe { (*style_variant.Anonymous.Anonymous).vt == VT_BSTR } {
+                            existing_style = unsafe {
+                                String::from_utf16_lossy(&(*style_variant.Anonymous.Anonymous).Anonymous.bstrVal)
+                            };
+                            // To preserve existing styles, we need to append them. Ensure there's a semicolon separator.
+                            if !existing_style.is_empty() && !existing_style.ends_with(';') {
+                                existing_style.push(';');
                             }
                         }
-
-                        // Combine the new styles from the CSS classes with any pre-existing inline styles.
-                        // We prepend our new styles so that existing inline styles can override them if needed, which is standard CSS behavior.
-                        let final_style = format!("{}{}", combined_properties, existing_style);
-                        
-                        // SAFER APPROACH: Create the BSTR and convert it to a VARIANT safely using `From`.
-                        // This sets VT_BSTR and transfers ownership without manual unsafe manipulation.
-                        let variant_value = VariantGuard(VARIANT::from(BSTR::from(final_style)));
-                        
-                        // Finally, set the 'style' attribute on the element with our new, combined style string.
-                        let _ = unsafe { element.setAttribute(&bstr_style, &variant_value) };
                     }
+
+                    // Combine the new styles from the CSS rule with any pre-existing inline styles.
+                    // We prepend our new styles so that existing inline styles can override them if needed, which is standard CSS behavior.
+                    let final_style = format!("{}{}", properties_to_apply, existing_style);
+                    
+                    // SAFER APPROACH: Create the BSTR and convert it to a VARIANT safely using `From`.
+                    // This sets VT_BSTR and transfers ownership without manual unsafe manipulation.
+                    let variant_value = VariantGuard(VARIANT::from(BSTR::from(final_style)));
+                    
+                    // Finally, set the 'style' attribute on the element with our new, combined style string.
+                    let _ = unsafe { element.setAttribute(&bstr_style, &variant_value) };
                 }
             }
         }
