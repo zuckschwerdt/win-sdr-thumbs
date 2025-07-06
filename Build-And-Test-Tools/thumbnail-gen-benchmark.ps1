@@ -7,11 +7,11 @@
 # -------------------- DEFAULT SETTINGS --------------------
 param(
     # Directory containing SVG files to test on
-    [string]$testDirectory,
+    [string]$dir,
 
     # Preset for thumbnail size, can be Small, Medium, Large, or ExtraLarge
     [ValidateSet("Small", "Medium", "Large", "ExtraLarge")]
-    [string]$requestedPreset = "Large", # Possible values: Small, Medium, Large, ExtraLarge
+    [string]$size = "Large", # Possible values: Small, Medium, Large, ExtraLarge
 
     # Number of times to run the benchmark and average the results
     [int]$numberOfRuns = 5,
@@ -29,15 +29,15 @@ param(
     [string]$ApiPackDllPath = $null
 )
 
-# Set default for $testDirectory if not provided, which is next to the script in a folder named "TestSvgFiles"
-if (-not $testDirectory -or $testDirectory -eq "") {
-    $testDirectory = Join-Path -Path $PSScriptRoot -ChildPath "TestSvgFiles"
+# Set default for $dir if not provided, which is next to the script in a folder named "TestSvgFiles"
+if (-not $dir -or $dir -eq "") {
+    $dir = Join-Path -Path $PSScriptRoot -ChildPath "TestSvgFiles"
 }
 
 
 # ------------ Some Validation -----------------
-if (-not (Test-Path $testDirectory)) {
-    Write-Error "Test directory '$testDirectory' does not exist. Please provide a valid path containing SVG files to test on."
+if (-not (Test-Path $dir)) {
+    Write-Error "Test directory '$dir' does not exist. Please provide a valid path containing SVG files to test on."
     return
 }
 
@@ -155,13 +155,13 @@ function Benchmark-Thumbnails {
     }
 }
 
-Write-Host "`nPreparing to run benchmark $numberOfRuns times with preset '$requestedPreset'..."
+Write-Host "`nPreparing to run benchmark $numberOfRuns times with preset '$size'..."
 $allRunResults = @()
 
 # --- Main Benchmark Loop ---
 for ($i = 1; $i -le $numberOfRuns; $i++) {
     Write-Host "`n--- Starting Run $i of $numberOfRuns ---"
-    $runResult = Benchmark-Thumbnails -Path $testDirectory -ThumbnailPreset $requestedPreset -ThumbnailOnly $thumbnailOnly -InCacheOnly $inCacheOnly -ApiPackDllPath $ApiPackDllPath
+    $runResult = Benchmark-Thumbnails -Path $dir -ThumbnailPreset $size -ThumbnailOnly $thumbnailOnly -InCacheOnly $inCacheOnly -ApiPackDllPath $ApiPackDllPath
     
     if ($runResult) {
         $allRunResults += $runResult
@@ -194,13 +194,13 @@ if ($allRunResults.Count -gt 0) {
 
 # --- Save first two thumbnails as samples for verification if desired ---
 if ($outputSampleFiles) {
-    $sampleFiles = Get-ChildItem -Path $testDirectory -Filter '*.svg' -File | Select-Object -First 2
+    $sampleFiles = Get-ChildItem -Path $dir -Filter '*.svg' -File | Select-Object -First 2
     foreach ($file in $sampleFiles) {
         try {
             $shellFile = [Microsoft.WindowsAPICodePack.Shell.ShellFile]::FromFilePath($file.FullName)
             
             # Select the correct property for the sample image
-            $thumbnailBitmap = switch ($requestedPreset) {
+            $thumbnailBitmap = switch ($size) {
                 "Small"      { $shellFile.Thumbnail.SmallBitmap }
                 "Medium"     { $shellFile.Thumbnail.MediumBitmap }
                 "Large"      { $shellFile.Thumbnail.LargeBitmap }
@@ -210,7 +210,7 @@ if ($outputSampleFiles) {
             
             if ($thumbnailBitmap) {
                 # Save the sample next to the script file
-                $outputFileName = "$($file.BaseName)_thumbnail_$($requestedPreset)_sample.bmp"
+                $outputFileName = "$($file.BaseName)_thumbnail_$($size)_sample.bmp"
                 $outputPath = Join-Path -Path $PSScriptRoot -ChildPath $outputFileName
                 
                 $thumbnailBitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
