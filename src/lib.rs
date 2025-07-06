@@ -34,7 +34,6 @@ use windows::{
         System::{
             self,
             Com,
-            Ole,
             Variant::*,
             Registry::{
                 *,
@@ -266,12 +265,6 @@ impl<'a> Drop for D2D1DrawGuard<'a> {
 // RAII wrapper for VARIANT - automatically calls VariantClear when dropped
 struct VariantGuard(VARIANT);
 
-impl VariantGuard {
-    fn new() -> Self {
-        Self(VARIANT::default())
-    }
-}
-
 impl Drop for VariantGuard {
     fn drop(&mut self) {
         // This is safe to call even on a default/zeroed VARIANT
@@ -442,20 +435,11 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
     let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }
         .ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream for MSXML"))?;
     
-    // The `dom.load` method is particular and requires its input to be a `VARIANT` (a special COM struct that can hold many different types of data.)
-    // We use our `VariantGuard` to ensure `VariantClear` is called, which will correctly release the COM object we're about to put in it.
-    let mut stream_variant = VariantGuard::new();
-    unsafe {
-        // Get a mutable reference to the anonymous union inside the `VARIANT` struct.
-        let v = &mut stream_variant.Anonymous.Anonymous;
-        // Set variant type tag to `VT_UNKNOWN` -- it holds a generic COM interface pointer (`IUnknown`).
-        v.vt = VT_UNKNOWN;
-        // Transfer ownership of the `IStream` COM object to the `VARIANT`.
-        // `stream.into()` converts the `IStream` smart pointer into its base `IUnknown` smart pointer.
-        // `std::mem::ManuallyDrop::new` is CRITICAL: it prevents Rust from calling `Release` on the `stream` variable when it goes out of scope.
-        // We have given ownership to the `VARIANT`, so the `VariantGuard` is now responsible for its cleanup. This prevents a double-release crash.
-        v.Anonymous.punkVal = std::mem::ManuallyDrop::new(Some(stream.into()));
-    }
+    // The `dom.load` method requires a `VARIANT`. Convert IStream to IUnknown first, then create VARIANT.
+    // It sets VT_UNKNOWN, handles the conversion to IUnknown, and manages the ownership transfer (ManuallyDrop) internally.
+    // We then immediately wrap the resulting raw VARIANT in our VariantGuard.
+    let stream_unknown: IUnknown = stream.cast()?;
+    let stream_variant = VariantGuard(VARIANT::from(stream_unknown));
 
     // The MSXML parser will read the SVG data directly from our in-memory stream.
     let success = unsafe { dom.load(&stream_variant)? };
@@ -532,17 +516,11 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
                         // Combine the new styles from the CSS classes with any pre-existing inline styles.
                         // We prepend our new styles so that existing inline styles can override them if needed, which is standard CSS behavior.
                         let final_style = format!("{}{}", combined_properties, existing_style);
-                        // Create a new BSTR from our final combined Rust String.
-                        let bstr = BSTR::from(final_style);
-                        // We need to put this new BSTR into a VARIANT to pass it to `setAttribute`.
-                        let mut variant_value = VariantGuard::new();
-                        unsafe {
-                            let v = &mut variant_value.Anonymous.Anonymous;
-                            v.vt = VT_BSTR;
-                            // Again, use `ManuallyDrop` to transfer ownership of the `bstr` to the `VARIANT`, preventing a double-free.
-                            v.Anonymous.bstrVal = std::mem::ManuallyDrop::new(bstr);
-                        }
-
+                        
+                        // SAFER APPROACH: Create the BSTR and convert it to a VARIANT safely using `From`.
+                        // This sets VT_BSTR and transfers ownership without manual unsafe manipulation.
+                        let variant_value = VariantGuard(VARIANT::from(BSTR::from(final_style)));
+                        
                         // Finally, set the 'style' attribute on the element with our new, combined style string.
                         let _ = unsafe { element.setAttribute(&bstr_style, &variant_value) };
                     }
