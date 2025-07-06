@@ -34,13 +34,17 @@ use windows::{
         System::{
             self,
             Com,
+            Ole,
+            Variant::*,
             Registry::{
                 *,
                 RegCreateKeyExW,
                 RegSetValueExW,
             }
         },
-        UI::Shell
+        UI::Shell,
+        Data::Xml::MsXml,
+        Data::Xml::MsXml::*,
     },
 };
 
@@ -259,7 +263,234 @@ impl<'a> Drop for D2D1DrawGuard<'a> {
     }
 }
 
-/// Renders SVG data to a GDI HBITMAP with an alpha channel using a robust staging bitmap technique.
+/// Parses CSS text content and returns a list of class names and their concatenated style properties.
+fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
+    let mut style_list: Vec<(String, String)> = Vec::new();
+    
+    // Clean the input string: remove leading/trailing whitespace and control characters,
+    // which should get rid of the junk data you're seeing from the buffer.
+    let cleaned_content = remove_css_comments(css_content.trim());
+    
+    // Split by '}' to get individual rules
+    let rules: Vec<&str> = cleaned_content.split('}').collect();
+    
+    for rule in rules {
+        let rule = rule.trim();
+        if rule.is_empty() {
+            continue;
+        }
+        
+        // Find the opening brace to separate selectors from properties
+        if let Some(brace_pos) = rule.find('{') {
+            let selectors_part = rule[..brace_pos].trim();
+            let properties_part = rule[brace_pos + 1..].trim();
+            
+            // Split selectors by comma for grouped rules like ".cls-1, .cls-2"
+            let selectors: Vec<&str> = selectors_part.split(',').collect();
+            
+            for selector in selectors {
+                let selector = selector.trim();
+                
+                // We only care about class selectors (starting with '.')
+                if let Some(class_name) = selector.strip_prefix('.') {
+                    let class_name = class_name.trim().to_string();
+                    let normalized_properties = normalize_css_properties(properties_part);
+
+                    // Find if this class already exists in our list
+                    if let Some((_key, existing_styles)) = style_list.iter_mut().find(|(key, _)| key == &class_name) {
+                        // If yes, append the new properties
+                        existing_styles.push_str(&normalized_properties);
+                    } else {
+                        // If no, add a new entry to the list
+                        style_list.push((class_name, normalized_properties));
+                    }
+                }
+            }
+        }
+    }
+    
+    style_list
+}
+
+/// Removes CSS comments from the input string.
+fn remove_css_comments(css: &str) -> String {
+    let mut result = String::new();
+    let mut chars = css.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '/' && chars.peek() == Some(&'*') {
+            // Start of comment, consume until */
+            chars.next(); // consume '*'
+            
+            while let Some(ch) = chars.next() {
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next(); // consume '/'
+                    break;
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
+}
+
+/// Normalizes CSS properties to ensure they're properly formatted for inline styles.
+fn normalize_css_properties(properties: &str) -> String {
+    let mut result = String::new();
+    
+    // Split by semicolon and clean up each property
+    let props: Vec<&str> = properties.split(';').collect();
+    
+    for prop in props {
+        let prop = prop.trim();
+        if !prop.is_empty() {
+            result.push_str(prop);
+            if !prop.ends_with(';') {
+                result.push(';');
+            }
+        }
+    }
+    
+    result
+}
+
+/// Parses raw SVG data to extract CSS from <style> tags found within a <defs> block.
+/// This avoids the unreliable ID2D1SvgElement DOM traversal for styles.
+/// Returns a single string containing all found CSS rules.
+fn extract_css_from_svg_data(svg_data: &[u8]) -> String {
+    let svg_string = String::from_utf8_lossy(svg_data);
+    let mut css_content = String::new();
+
+    // Find the <defs> block first. We only care about styles inside it.
+    if let Some(defs_start) = svg_string.find("<defs") {
+        if let Some(defs_end) = svg_string[defs_start..].find("</defs>") {
+            let defs_block_content = &svg_string[defs_start..defs_start + defs_end];
+            
+            // Now, find all <style> tags within that block.
+            let mut current_pos = 0;
+            while let Some(style_start_tag) = defs_block_content[current_pos..].find("<style") {
+                let style_start_abs = current_pos + style_start_tag;
+                if let Some(style_content_start) = defs_block_content[style_start_abs..].find('>') {
+                    let style_content_start_abs = style_start_abs + style_content_start + 1;
+                    if let Some(style_content_end) = defs_block_content[style_content_start_abs..].find("</style>") {
+                        let style_content_end_abs = style_content_start_abs + style_content_end;
+                        
+                        let content = &defs_block_content[style_content_start_abs..style_content_end_abs];
+                        css_content.push_str(content);
+                        css_content.push('\n'); // Add a newline for separation.
+                        
+                        current_pos = style_content_end_abs;
+                    } else { break; } // No closing </style> tag found.
+                } else { break; } // No opening '>' found for style tag.
+            }
+        }
+    }
+    
+    css_content
+}
+
+/// Applies inline styles to SVG elements based on their class attributes using the MSXML parser.
+/// It loads the SVG, finds elements by class, applies the provided styles, and returns the modified SVG data.
+fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) -> Result<Vec<u8>> {
+    // If no styles were found, there's nothing to do. Return the original data to avoid
+    // the overhead of parsing and re-serializing the XML.
+    if style_map.is_empty() {
+        return Ok(svg_data.to_vec());
+    }
+
+    // MSXML is a COM component, so we need to ensure COM is initialized on this thread.
+    let _com_guard = ComGuard::new()?;
+
+    // Create an instance of the MSXML DOM Document object.
+    let dom: MsXml::IXMLDOMDocument2 = unsafe { Com::CoCreateInstance(&DOMDocument60, None, Com::CLSCTX_INPROC_SERVER)? };
+    
+    // --- Load SVG data into the DOM document ---
+    let safe_array = unsafe { Ole::SafeArrayCreateVector(windows::Win32::System::Variant::VARENUM(VT_UI1.0 as u16), 0, svg_data.len() as u32) };
+    if safe_array.is_null() {
+        return Err(Error::new(E_FAIL, "Failed to create SafeArray"));
+    }
+    
+    let mut p_data: *mut std::ffi::c_void = std::ptr::null_mut();
+    unsafe { Ole::SafeArrayAccessData(safe_array, &mut p_data)? };
+    unsafe { std::ptr::copy_nonoverlapping(svg_data.as_ptr(), p_data as *mut u8, svg_data.len()) };
+    unsafe { Ole::SafeArrayUnaccessData(safe_array)? };
+
+    let mut variant_data = VARIANT::default();
+    unsafe {
+        (*variant_data.Anonymous.Anonymous).vt = VT_ARRAY | VT_UI1;
+        (*variant_data.Anonymous.Anonymous).Anonymous.parray = safe_array;
+    }
+
+    let success = unsafe { dom.load(&variant_data)? };
+    if success != VARIANT_TRUE {
+        return Err(Error::new(E_FAIL, "MSXML failed to load SVG data. It may be malformed."));
+    }
+
+    // --- Find elements with 'class' attribute and apply styles inline ---
+    let tagged_nodes: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from("//*[@class]"))? };
+    for i in 0..unsafe { tagged_nodes.length()? } {
+        if let Ok(node) = unsafe { tagged_nodes.get_item(i) } {
+            if let Ok(element) = node.cast::<IXMLDOMElement>() {
+                if let Ok(class_variant) = unsafe { element.getAttribute(&BSTR::from("class")) } {
+                    let mut class_buffer = vec![0u16; 256];
+                    let class_str = if unsafe { VariantToString(&class_variant, &mut class_buffer) }.is_ok() {
+                        String::from_utf16_lossy(&class_buffer[..class_buffer.iter().position(|&x| x == 0).unwrap_or(class_buffer.len())])
+                    } else {
+                        String::new()
+                    };
+
+                    if class_str.is_empty() { continue; }
+
+                    let mut combined_properties = String::new();
+                    for class_name in class_str.split_whitespace() {
+                        if let Some((_key, style_properties)) = style_map.iter().find(|(key, _)| key == class_name) {
+                            combined_properties.push_str(style_properties);
+                        }
+                    }
+
+                    if !combined_properties.is_empty() {
+                        let mut existing_style = String::new();
+                        if let Ok(style_variant) = unsafe { element.getAttribute(&BSTR::from("style")) } {
+                            if unsafe { (*style_variant.Anonymous.Anonymous).vt } != VT_NULL {
+                                let mut style_buffer = vec![0u16; 1024];
+                                if unsafe { VariantToString(&style_variant, &mut style_buffer) }.is_ok() {
+                                    existing_style = String::from_utf16_lossy(&style_buffer[..style_buffer.iter().position(|&x| x == 0).unwrap_or(style_buffer.len())]);
+                                    if !existing_style.is_empty() && !existing_style.ends_with(';') {
+                                        existing_style.push(';');
+                                    }
+                                }
+                            }
+                        }
+
+                        let final_style = format!("{}{}", combined_properties, existing_style);
+                        let bstr = BSTR::from(final_style);
+                        let mut variant_value = VARIANT::default();
+                        unsafe {
+                            let v = &mut variant_value.Anonymous.Anonymous;
+                            v.vt = VT_BSTR;
+                            v.Anonymous.bstrVal = std::mem::ManuallyDrop::new(bstr);
+                        }
+
+                        let _ = unsafe { element.setAttribute(&BSTR::from("style"), &variant_value) };
+                        unsafe { VariantClear(&mut variant_value)? };
+                    }
+                }
+            }
+        }
+    }
+
+    // Serialize the modified DOM back to an XML string.
+    let modified_xml_bstr = unsafe { dom.xml()? };
+    let modified_xml_string = modified_xml_bstr.to_string();
+
+    //DEBUG print the modified XML string log
+    // log_message(modified_xml_string.as_str());
+
+    Ok(modified_xml_string.into_bytes())
+}
+
 pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result<Gdi::HBITMAP> {
     // Encapsulate main rendering logic in a helper closure.
     // This makes it easier to catch any error, check if it's D2DERR_RECREATE_TARGET, poison the resources if needed, and then return the original error.
@@ -290,10 +521,19 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
             // Clear to transparent black
             unsafe { d2d_context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 })) };
             
-            // Load svg data into a memory stream as the input for the SVG document
-            let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
+            // Phase 1: Manually parse styles from the raw SVG data.
+            let css_content = extract_css_from_svg_data(svg_data);
+            let style_map = parse_css_rules(&css_content);
+            // log_message(&format!("Style list contents: {:?}", style_map));
+
+            // Preprocess the SVG to inline all CSS styles from the map.
+            // This returns a new SVG data buffer with styles applied as inline `style` attributes.
+            let processed_svg_data = preprocess_svg_with_msxml(svg_data, &style_map)?;
+
+            // Load the PROCESSED svg data into a memory stream.
+            let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(&processed_svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
             
-            // Create the SVG document from the stream of SVG data
+            // Create the SVG document from the stream of PROCESSED SVG data.
             let svg_doc: ID2D1SvgDocument = unsafe { d2d_context.CreateSvgDocument(
                 &stream,
                 D2D_SIZE_F { 
@@ -301,6 +541,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], width: u32, height: u32) -> Result
                     height: height as f32
                 }
             ) }?;
+            
+            // Phase 2 is no longer needed as styles are inlined in the data stream.
             
             // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
             if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
@@ -572,9 +814,9 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     }
 }
 
-// -------------- Logger ----------------
+// // -------------- Logger ----------------
 // fn log_message(message: &str) {
-//     if let Ok(mut file) = OpenOptions::new()
+//     if let Ok(mut file) = std::fs::OpenOptions::new()
 //         .create(true)
 //         .append(true)
 //         .open("C:\\temp\\svg_thumb_log.txt") // Make sure C:\temp exists!
@@ -585,6 +827,10 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 //             .as_secs();
 //         let _ = writeln!(file, "[{}] {}", time, message);
 //     }
+// }
+
+// fn log_message(message: &str) {
+//     println!("{}", message);
 // }
 
 // =================================================================
