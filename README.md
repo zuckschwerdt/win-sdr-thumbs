@@ -52,13 +52,10 @@ Note: Also see [current limitations](#current-limitations) section
     ```
 
 ## Current Limitations:
-- Currently, some SVGs may render as black squares or as being filled completely black
-  - Such SVGs contain properties not [supported by the Direct2D API](https://learn.microsoft.com/en-us/windows/win32/direct2d/svg-support) which this extension uses, but I'm working on workarounds for full support
-- The most notable limitations seem to be lack of support for:
-  - CSS `<style>` blocks within a separate dedicated `<def>` block
-  - `<Text>` elements
-- **Upcoming Improvements**: For the CSS style blocks at least, the API *does* support in-line style strings. So I have a plan that where I can do some simple parsing and just copy the the styles from the `<def>` block to their individual attributes.
-  - This would fix a vast majority of the current failed renderings (which are already relatively uncommon)
+- Currently, a small fraction of SVGs may render as black squares or as being filled completely black
+  - Such SVGs contain properties not [supported by the Direct2D API](https://learn.microsoft.com/en-us/windows/win32/direct2d/svg-support) which this extension uses
+  - There is also no support for text glyphs
+- Overall, a vast majority of SVGs should render correctly. If you notice any from a particular program that consistently don't render, you can create an issue and I can see if anything can be done.
 
 ## Usage
 
@@ -74,7 +71,11 @@ To uninstall, run the following command in an administrator Command Prompt:
 When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with this DLL through a series of steps:
 
 1.  **Initialization**: Explorer provides the `.svg` file's data as a stream to the DLL. The provider reads this entire stream into memory.
-2.  **Direct2D Rendering**:
+2.  **SVG Data Pre-Processing**:
+    * The API doesn't support CSS `<style>` blocks within a separate dedicated <def> block, or at the top level. Therefore the script does some pre-processing on the XML so such SVGs will look correct
+    * It uses the MSXML Windows API to look for `<style>` tags that apply styles to classes or named attributes
+    * Then because the Direct2D API *does* support in-line style strings, the code does some rudimentary CSS parsing and applies the styles to each individual element (also using MSXML) before passing it to the Direct2D API.
+4.  **Direct2D Rendering**:
     * The provider uses the **Direct2D** graphics API for high-performance, hardware-accelerated rendering.
     * It creates a GPU-based bitmap to serve as a render target.
     * The Direct2D API turns the SVG data into a `SvgDocument` object. The `viewport` attribute is set to the thumbnail size requested by Explorer.
@@ -82,14 +83,14 @@ When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with thi
     * The `SvgDocument` is then drawn onto the render target bitmap.
     * The `unpremultiply` effect is then applied to the bitmap, because the standard Windows GDI requires straight alpha.
       * The un-premultiplication step is necessary for displaying transparency correctly and prevents dark edges from appearing on the final thumbnail.
-3.  **Pixel Data Transfer**:
+5.  **Pixel Data Transfer**:
     * The rendered image is copied from the GPU render target to a "staging" bitmap on the CPU, which allows the program to access the raw pixel data.
     * This data is in a 32-bit BGRA format with **straight alpha** (after the unpremultiply effect).
     * Note: Although the staging bitmap is declared to Direct2D as having premultiplied alpha format (required for proper bitmap operations), the actual pixel values contain straight alpha data due to the unpremultiply effect. Direct2D normally only works with premultiplied alpha, but this doesn't matter at this point since we're just copying the data out to GDI.
-4.  **Creating the Final Thumbnail**:
+6.  **Creating the Final Thumbnail**:
     * A standard Windows GDI `HBITMAP` is created, which is the final format Explorer needs for the thumbnail.
     * The pixel data is copied from the staging bitmap to the final `HBITMAP`.
-5.  **Safety**: The entire thumbnail generation process is wrapped in a panic handler (`catch_unwind`). This ensures that if any unexpected error occurs during rendering, it will not crash the host application (e.g., `explorer.exe`).
+7.  **Safety**: The entire thumbnail generation process is wrapped in a panic handler (`catch_unwind`). This ensures that if any unexpected error occurs during rendering, it will not crash the host application (e.g., `explorer.exe`).
 
 ## How to Compile it Yourself
 
