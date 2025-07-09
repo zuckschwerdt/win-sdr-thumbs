@@ -38,23 +38,17 @@ Note: Also see [current limitations](#current-limitations) section
 <img width=650 src=https://github.com/user-attachments/assets/67050436-809e-437b-9c17-4cdeeb386450>
 </p>
 
-## How To Install (Easy)
+# How To Install
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
 2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
-    - It can be uninstalled like any other app in the Apps list, or by running the MSI installer again and selecting "Remove".
+3.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
 
-## How to Manually Register DLL Yourself (Advanced)
-If you want to manually register the DLL yourself instead of using the MSI installer, follow these steps:
-1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
-2.  Download the latest `win_svg_thumbs.dll` file.
-     - **IMPORTANT:** For security, place it somewhere that requires admin access to write, such as making a folder in `C:\Program Files`
-4.  Open a Command Prompt with **administrator privileges**.
-     - (Administrator is required or you will get error `0x80004005` for lack of permission)
-5.  Navigate to the directory where you saved the `.dll` file.
-6.  Run the following command to register the DLL:
-    ```
-    regsvr32 win_svg_thumbs.dll
-    ```
+
+#### Notes:
+ - It can be uninstalled like any other app in Windows' Installed Apps list
+ - To manually register the DLL yourself instead of using the installer, see these instructions [here](#how-to-manually-register-dll-yourself-advanced).
+
+------
 
 ## Current Limitations:
 - Currently, a small fraction of SVGs may render as black squares or as being filled completely black
@@ -62,14 +56,6 @@ If you want to manually register the DLL yourself instead of using the MSI insta
   - There is also no support for text glyphs
 - Overall, a vast majority of SVGs should render correctly. If you notice any from a particular program that consistently don't render, you can create an issue and I can see if anything can be done.
 
-## Usage
-
-Once the DLL is registered, Windows Explorer will automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
-
-To uninstall, run the following command in an administrator Command Prompt:
-  ```
-  regsvr32 /u win_svg_thumbs.dll
-  ```
 
 ## How it works (Technical Details)
 
@@ -96,6 +82,24 @@ When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with thi
     * A standard Windows GDI `HBITMAP` is created, which is the final format Explorer needs for the thumbnail.
     * The pixel data is copied from the staging bitmap to the final `HBITMAP`.
 7.  **Safety**: The entire thumbnail generation process is wrapped in a panic handler (`catch_unwind`). This ensures that if any unexpected error occurs during rendering, it will not crash the host application (e.g., `explorer.exe`).
+
+## How to Manually Register DLL Yourself (Advanced)
+If you want to manually register the DLL yourself instead of using the MSI installer, follow these steps:
+1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
+2.  Download the latest `win_svg_thumbs.dll` file.
+     - **IMPORTANT:** For security, place it somewhere that requires admin access to write, such as making a folder in `C:\Program Files`
+4.  Open a Command Prompt with **administrator privileges**.
+     - (Administrator is required or you will get error `0x80004005` for lack of permission)
+5.  Navigate to the directory where you saved the `.dll` file.
+6.  Run the following command to register the DLL:
+    ```
+    regsvr32 win_svg_thumbs.dll
+    ```
+
+To uninstall, run the following command in an administrator Command Prompt:
+  ```
+  regsvr32 /u win_svg_thumbs.dll
+  ```
 
 ## How to Compile it Yourself
 
