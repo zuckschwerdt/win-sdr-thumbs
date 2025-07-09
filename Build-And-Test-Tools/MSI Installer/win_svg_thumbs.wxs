@@ -7,7 +7,16 @@
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
 
-         <UI>
+        <!-- Define custom banner and dialog bitmaps for the installer -->
+		<WixVariable Id="WixUIDialogBmp" Overridable="yes" Value="Resources\Dialog.png" />
+		<WixVariable Id="WixUIBannerBmp" Overridable="yes" Value="Resources\Banner.png" />
+
+        <!-- Define the main icon for the installer UI and Add/Remove Programs -->
+        <!-- Apparently you have to first define the <Icon> then use that ID for the property. Can't just directly use the icon path in the APPPRODUCTION value -->
+		<Icon Id="MyAppIcon" SourceFile="Resources\icon.ico"/>
+		<Property Id="ARPPRODUCTICON" Value="MyAppIcon" />
+
+        <UI>
             <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
             <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
             <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
