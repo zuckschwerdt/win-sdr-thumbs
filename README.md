@@ -38,13 +38,12 @@ Note: Also see [current limitations](#current-limitations) section
 <img width=650 src=https://github.com/user-attachments/assets/67050436-809e-437b-9c17-4cdeeb386450>
 </p>
 
-## How to Install
+## How To Install (Easy)
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
-2.  For the latest release, look under `Assets`, and download the latest `win_svg_thumbs.msi` installer and run it.
-    - The DLL will be installed to `C:\Program Files\ThioJoe\SVG Thumbnail Extension`, and automatically registered as a thumbnail handler.
+2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
     - It can be uninstalled like any other app in the Apps list, or by running the MSI installer again and selecting "Remove".
 
-## How to Manually Install DLL
+## How to Manually Register DLL Yourself (Advanced)
 If you want to manually register the DLL yourself instead of using the MSI installer, follow these steps:
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
 2.  Download the latest `win_svg_thumbs.dll` file.
