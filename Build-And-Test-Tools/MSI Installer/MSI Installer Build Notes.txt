@@ -1,0 +1,14 @@
+Requires Wix toolset:
+	https://github.com/wixtoolset/wix/releases
+
+To automatically build the MSI installer with the version parsed from cargo.toml, just run the "Build MSI Installer.bat" batch file.
+
+
+
+Or to build manually, run this command to build the MSI installer, replacing with whatever actual version:
+	wix build win_svg_thumbs.wxs -d ProductVersion="1.0.0.0" -arch x64 -ext WixToolset.UI.wixext
+
+
+Notes: 
+	- It expects the DLL to be two levels up then in "target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll". To change the path of the DLL relative to the .wxs file, open the .wxs file and change the "DllSourcePath" value near the top.
+

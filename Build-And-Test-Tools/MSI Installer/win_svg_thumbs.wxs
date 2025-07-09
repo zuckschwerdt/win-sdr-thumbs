@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-    <Package Name="Thio's SVG Thumbnail Extension" Language="1033" Version="1.8.0.0" Manufacturer="ThioJoe" UpgradeCode="e345203a-2e6e-4854-9797-fb94221a839a">
+
+	<?define DllSourcePath = "..\..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll" ?>
+
+    <Package Name="Thio's SVG Thumbnail Extension" Language="1033" Version="$(var.ProductVersion)" Manufacturer="ThioJoe" UpgradeCode="e345203a-2e6e-4854-9797-fb94221a839a">
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
 
@@ -42,7 +45,7 @@
         <Feature Id="ProductFeature" Title="Thio's SVG Thumbnail Extension Title">
             <Component Id="win_svg_thumbs.dll" Guid="f8ee4ddf-0fbb-4680-8a10-9960182540e6" Directory="INSTALLFOLDER">
                 <File Id="win_svg_thumbs.dll"
-                      Source="win_svg_thumbs.dll"
+                      Source="$(var.DllSourcePath)"
                       KeyPath="yes"
                       SelfRegCost="1" />
             </Component>
