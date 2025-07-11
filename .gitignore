@@ -16,3 +16,4 @@ TestSvgFiles
 /target
 /Testing/target
 *.lock
+Build-And-Test-Tools/MSI Installer/*.dll

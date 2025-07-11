@@ -48,12 +48,7 @@ use windows::{
     },
 };
 
-// Use correct registry view for 32-bit process on 64-bit Windows
-// If read access needed later add KEY_READ to both
-#[cfg(target_pointer_width = "32")]
-const WRITE_FLAGS: REG_SAM_FLAGS = KEY_WRITE | KEY_WOW64_64KEY;
-
-#[cfg(not(target_pointer_width = "32"))]
+// This is the ONLY definition you need. It works for both 32-bit and 64-bit.
 const WRITE_FLAGS: REG_SAM_FLAGS = KEY_WRITE;
 
 // =================================================================
@@ -1306,11 +1301,20 @@ impl RegistryKeyGuard {
 
 fn delete_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-    let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
+    // Delete the InprocServer32 subkey first
+    let inproc_path = to_pcwstr(&format!("CLSID\\{}\\InprocServer32", clsid_string));
+    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, PCWSTR(inproc_path.as_ptr()), WRITE_FLAGS.0, Some(0)); }
 
-    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr())).ok()? };
-    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()? };
-    unsafe { RegDeleteTreeW(HKEY_CLASSES_ROOT, w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}")).ok()? };
+    // Now delete the main CLSID key
+    let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
+    unsafe { RegDeleteKeyExW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr()), WRITE_FLAGS.0, Some(0)).ok()? };
+    
+    // For the shellex entries, use let _ = to ignore errors
+    let svg_path = w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}");
+    let svgz_path = w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}");
+    
+    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, svg_path, WRITE_FLAGS.0, Some(0)); }
+    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, svgz_path, WRITE_FLAGS.0, Some(0)); }
 
     unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
 

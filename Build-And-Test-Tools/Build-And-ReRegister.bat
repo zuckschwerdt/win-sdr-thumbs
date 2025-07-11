@@ -11,13 +11,13 @@ if %errorLevel% neq 0 (
 )
 
 :: Unregister the previous DLL version
-regsvr32 /u "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll"
+regsvr32 /u "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
 
 
 :: Get the absolute path to the DLL
 set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%\.."
-set "DLL_PATH=%CD%\target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll"
+set "DLL_PATH=%CD%\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
 popd
 ::echo  "%DLL_PATH%"
 
@@ -28,6 +28,8 @@ popd
 :: Run the build. Tried to to make it run as a non-admin, but couldn't get it to work.
 cd /d %~dp0..
 cargo build --release --target=x86_64-pc-windows-msvc
+cargo build --release --target=i686-pc-windows-msvc
 
-:: Re-register the new DLL version
-regsvr32 "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll"
+:: Re-register the new DLL version. Only bother re-registering the 64 bit one.
+regsvr32 "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
+

@@ -23,7 +23,7 @@ echo.
 echo Starting WiX build...
 
 REM Run the wix build command, passing the parsed version.
-wix build win_svg_thumbs.wxs -d ProductVersion="%PRODUCT_VERSION%" -o "SVG-Thumbnail-Extension-Installer_%PRODUCT_VERSION%.msi" -arch x64 -ext WixToolset.UI.wixext
+wix build win_svg_thumbs.wxs -d ProductVersion="%PRODUCT_VERSION%" -o "SVG-Thumbnail-Extension-Installer_%PRODUCT_VERSION%.msi" -ext WixToolset.UI.wixext -arch x64
 
 echo.
 echo Build finished. Press any key to exit.
