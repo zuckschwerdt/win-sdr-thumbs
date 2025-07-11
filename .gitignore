@@ -10,7 +10,9 @@ TestSvgFiles
 **/test.svg
 **/*.msi
 **/*.wixpdb
+**/_*
 
+# Rust Related
 /target
 /Testing/target
 *.lock
