@@ -1301,24 +1301,41 @@ impl RegistryKeyGuard {
 
 fn delete_registry_keys() -> Result<()> {
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
-    // Delete the InprocServer32 subkey first
+    
+    // Track if we encountered any real errors (not just "not found")
+    let mut first_real_error: Option<Error> = None;
+    
+    // Helper closure for robust key deletion
+    let mut delete_key_with_error_tracking = |key_path: PCWSTR| {
+        let result = unsafe { RegDeleteKeyExW(HKEY_CLASSES_ROOT, key_path, WRITE_FLAGS.0, Some(0)) };
+        if result == ERROR_SUCCESS || result == ERROR_FILE_NOT_FOUND {
+            // Success or key already gone - both fine for uninstall
+        } else {
+            // Real error (access denied, etc.) - remember the first one we see
+            if first_real_error.is_none() {
+                first_real_error = Some(Error::new(result.into(), "Registry key deletion failed"));
+            }
+        }
+    };
+    
+    // Try to delete all keys, tracking errors but not stopping
     let inproc_path = to_pcwstr(&format!("CLSID\\{}\\InprocServer32", clsid_string));
-    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, PCWSTR(inproc_path.as_ptr()), WRITE_FLAGS.0, Some(0)); }
+    delete_key_with_error_tracking(PCWSTR(inproc_path.as_ptr()));
 
-    // Now delete the main CLSID key
     let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
-    unsafe { RegDeleteKeyExW(HKEY_CLASSES_ROOT, PCWSTR(clsid_path.as_ptr()), WRITE_FLAGS.0, Some(0)).ok()? };
+    delete_key_with_error_tracking(PCWSTR(clsid_path.as_ptr()));
     
-    // For the shellex entries, use let _ = to ignore errors
-    let svg_path = w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}");
-    let svgz_path = w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}");
-    
-    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, svg_path, WRITE_FLAGS.0, Some(0)); }
-    unsafe { let _ = RegDeleteKeyExW(HKEY_CLASSES_ROOT, svgz_path, WRITE_FLAGS.0, Some(0)); }
+    delete_key_with_error_tracking(w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"));
+    delete_key_with_error_tracking(w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"));
 
+    // Always notify of association changes, even if some deletions failed
     unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
 
-    Ok(())
+    // Now propagate the first real error we encountered, if any
+    match first_real_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 
