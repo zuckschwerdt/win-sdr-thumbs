@@ -1,41 +1,32 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-	<!-- <?if $(Platform) = x64 ?>
-		<?define DllSourcePath = "win_svg_thumbs_x64.dll" ?>
-		<?define ProductNameSuffix = "(64-bit)" ?>
-		<?define ComponentGuid = "f8ee4ddf-0fbb-4680-8a10-9960182540e6" ?>
-		<?define Win64 = "yes" ?>
-		<?define ProgramFilesFolder = "ProgramFiles64Folder" ?>
-	<?else?>
-		<?define DllSourcePath = "win_svg_thumbs_x86.dll" ?>
-		<?define ProductNameSuffix = "(32-bit)" ?>
-		<?define ComponentGuid = "eed77e44-a1ff-4bcc-92ce-c80718657270" ?>
-		<?define Win64 = "no" ?>
-		<?define ProgramFilesFolder = "ProgramFilesFolder" ?>
-	<?endif?> -->
+    <!-- GUIDs -->
+    <?define UpgradeCodeGuid = "e345203a-2e6e-4854-9797-fb94221a839a" ?>
+    <?define Clsid = "{a884a812-58fd-47d5-bda6-4fab4fabdcd9}" ?>
+    <?define ComponentGuidX64 = "f8ee4ddf-0fbb-4680-8a10-9960182540e6" ?>
+    <?define ComponentGuidX86 = "eed77e44-a1ff-4bcc-92ce-c80718657270" ?>
+    <?define ThumbnailProviderShellExGuid = "{E357FCCD-A995-4576-B01F-234630154E96}" ?>
 
-    <Package Name="Thio's SVG Thumbnail Extension" Language="1033" Version="$(var.ProductVersion)" Manufacturer="ThioJoe" UpgradeCode="e345203a-2e6e-4854-9797-fb94221a839a">
+    <Package Name="Thio's SVG Thumbnail Extension" Language="1033" Version="$(var.ProductVersion)" Manufacturer="ThioJoe" UpgradeCode="$(var.UpgradeCodeGuid)">
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
 
         <!-- Define custom banner and dialog bitmaps for the installer -->
 		<WixVariable Id="WixUIDialogBmp" Overridable="yes" Value="Resources\Dialog.png" />
 		<WixVariable Id="WixUIBannerBmp" Overridable="yes" Value="Resources\Banner.png" />
-
         <!-- Define the main icon for the installer UI and Add/Remove Programs -->
         <!-- Apparently you have to first define the <Icon> then use that ID for the property. Can't just directly use the icon path in the APPPRODUCTION value -->
 		<Icon Id="MyAppIcon" SourceFile="Resources\icon.ico"/>
 		<Property Id="ARPPRODUCTICON" Value="MyAppIcon" />
 
+        <!-- If the installer were to ask for the installation directory, this would show. But currently it doesn't. -->
         <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER_X64" />
-
 
         <UI>
             <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
             <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
             <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
-
             <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
 
             <DialogRef Id="ErrorDlg" />
@@ -49,9 +40,7 @@
             <DialogRef Id="WelcomeDlg" />
 
             <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
-
             <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" />
-
             <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
 
             <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
@@ -63,43 +52,80 @@
 
             <Property Id="ARPNOMODIFY" Value="1" />
         </UI>
-
         <UIRef Id="WixUI_Common" />
 
         <Feature Id="ProductFeature" Title="Thio's SVG Thumbnail Extension Title">
             
-            <!-- Component for the 64-bit DLL. Bitness is automatically inferred from the package's platform (x64). -->
-            <Component Id="Component_x64" Guid="f8ee4ddf-0fbb-4680-8a10-9960182540e6" Bitness="always64" Directory="INSTALLFOLDER_X64">
+            <!-- ========================= 64-bit DLL Component ========================= -->
+            <Component Id="Component_x64" Guid="$(var.ComponentGuidX64)" Bitness="always64" Directory="INSTALLFOLDER_X64">
                 <File Id="File_x64"
-                      Name="win_svg_thumbs_x64.dll"
-                      Source="win_svg_thumbs_x64.dll"
-                      KeyPath="yes"
-                      SelfRegCost="1" />
+                        Name="win_svg_thumbs_x64.dll"
+                        Source="win_svg_thumbs_x64.dll"
+                        KeyPath="yes" 
+                        Vital="yes"
+                        PatchWholeFile="yes"
+                        />
+
+                <!-- CLSID Registration (64 Bit: Will go under HKCR\CLSID) -->
+                <RegistryKey Root="HKCR" Key="CLSID\$(var.Clsid)">
+                    <RegistryValue Value="SVG Thumbnail Provider (Rust)" Type="string" />
+                    <RegistryKey Key="InprocServer32">
+                        <RegistryValue Value="[#File_x64]" Type="string" />
+                        <RegistryValue Name="ThreadingModel" Value="Apartment" Type="string" />
+                    </RegistryKey>
+                </RegistryKey>
+                
+                <!-- SVG Thumbnail Provider (64 Bit)-->
+                <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
+                    <RegistryValue Value="$(var.Clsid)" Type="string" />
+                </RegistryKey>
+
+                <!-- SVGZ Thumbnail Provider (64 Bit) -->
+                <RegistryKey Root="HKCR" Key=".svgz\shellex\$(var.ThumbnailProviderShellExGuid)">
+                    <RegistryValue Value="$(var.Clsid)" Type="string" />
+                </RegistryKey>
             </Component>
 
-            <!-- Component for the 32-bit DLL, pointing to the 32-bit directory ID -->
-            <Component Id="Component_x86" Guid="eed77e44-a1ff-4bcc-92ce-c80718657270" Bitness="always32" Directory="INSTALLFOLDER_X86">
+            <!-- ========================= 32-bit DLL Component ========================= -->
+            <Component Id="Component_x86" Guid="$(var.ComponentGuidX86)" Bitness="always32" Directory="INSTALLFOLDER_X86">
                 <File Id="File_x86"
-                      Name="win_svg_thumbs_x86.dll"
-                      Source="win_svg_thumbs_x86.dll"
-                      KeyPath="yes"
-                      SelfRegCost="1" />
+                        Name="win_svg_thumbs_x86.dll"
+                        Source="win_svg_thumbs_x86.dll"
+                        KeyPath="yes" 
+                        Vital="yes"
+                        PatchWholeFile="yes"
+                        />
+
+                <!-- CLSID Registration (32 Bit: Will go under HKCR\WOW6432Node\CLSID\) -->
+                <RegistryKey Root="HKCR" Key="CLSID\$(var.Clsid)">
+                    <RegistryValue Value="SVG Thumbnail Provider (Rust)" Type="string" />
+                    <RegistryKey Key="InprocServer32">
+                        <RegistryValue Value="[#File_x86]" Type="string" />
+                        <RegistryValue Name="ThreadingModel" Value="Apartment" Type="string" />
+                    </RegistryKey>
+                </RegistryKey>
+
+                <!-- SVG Thumbnail Provider (32 Bit) -->
+                <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
+                    <RegistryValue Value="$(var.Clsid)" Type="string" />
+                </RegistryKey>
+
+                <!-- SVGZ Thumbnail Provider (32 Bit) -->
+                <RegistryKey Root="HKCR" Key=".svgz\shellex\$(var.ThumbnailProviderShellExGuid)">
+                    <RegistryValue Value="$(var.Clsid)" Type="string" />
+                </RegistryKey>
             </Component>
 
         </Feature>
     </Package>
 
     <Fragment>
-        <!-- EXPLICIT 64-BIT DIRECTORY STRUCTURE -->
-        <!-- This resolves to C:\Program Files\ -->
         <StandardDirectory Id="ProgramFiles64Folder">
             <Directory Id="ManufacturerFolder_x64" Name="ThioJoe">
                 <Directory Id="INSTALLFOLDER_X64" Name="SVG Thumbnail Extension" />
             </Directory>
         </StandardDirectory>
 
-        <!-- EXPLICIT 32-BIT DIRECTORY STRUCTURE -->
-        <!-- This resolves to C:\Program Files (x86)\ on a 64-bit OS -->
         <StandardDirectory Id="ProgramFilesFolder">
             <Directory Id="ManufacturerFolder_x86" Name="ThioJoe">
                 <Directory Id="INSTALLFOLDER_X86" Name="SVG Thumbnail Extension" />

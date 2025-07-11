@@ -12,3 +12,30 @@ Or to build manually, run this command to build the MSI installer, replacing wit
 Notes: 
 	- It expects the DLL to be two levels up then in "target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll". To change the path of the DLL relative to the .wxs file, open the .wxs file and change the "DllSourcePath" value near the top.
 
+--------------------------------------------------------
+
+GUIDS used by the MSI Installer and DLL
+	- If using an AI to work on the WXS file, make sure it doesn't make a mistake when writing these
+
+	- Used only by MSI Installer:
+		UpgradeCode GUID: 	e345203a-2e6e-4854-9797-fb94221a839a
+		x64 Component GUID:	f8ee4ddf-0fbb-4680-8a10-9960182540e6
+		x86 Component GUID: eed77e44-a1ff-4bcc-92ce-c80718657270
+
+	- My Thumbnail Handler CLSID: 		{a884a812-58fd-47d5-bda6-4fab4fabdcd9}
+		
+	- Windows IThumbnailProvider CLSID:	{E357FCCD-A995-4576-B01F-234630154E96}
+		(This one is built into Windows and was not generated)
+
+
+--------------------------------------------------------
+
+Resulting Registry Paths:
+
+	HKEY_CLASSES_ROOT\CLSID\{A884A812-58FD-47D5-BDA6-4FAB4FABDCD9}
+	HKEY_CLASSES_ROOT\WOW6432Node\CLSID\{A884A812-58FD-47D5-BDA6-4FAB4FABDCD9}
+
+	HKEY_CLASSES_ROOT\.svg\shellex\{E357FCCD-A995-4576-B01F-234630154E96}
+	HKEY_CLASSES_ROOT\.svgz\shellex\{E357FCCD-A995-4576-B01F-234630154E96}
+
+
