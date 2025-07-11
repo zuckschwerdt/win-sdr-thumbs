@@ -1056,13 +1056,71 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                 }
                 Err(e) => {
                     //log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
-                    Err(e)
+                    
+                    // Instead of returning an error, create a fallback thumbnail
+                    match create_fallback_thumbnail(cx) {
+                        Ok(fallback_hbitmap) => {
+                            //log_message("GetThumbnail: Created fallback thumbnail for invalid SVG.");
+                            unsafe {
+                                *phbmp = fallback_hbitmap;
+                                *pdwalpha = Shell::WTSAT_ARGB;
+                            }
+                            Ok(())
+                        }
+                        Err(_) => {
+                            //log_message("GetThumbnail: Failed to create fallback thumbnail, returning error.");
+                            Err(e) // Only return error if we can't even create a fallback
+                        }
+                    }
                 }
             }
         })
     }
 }
 
+/// Creates a simple fallback thumbnail for invalid SVG files
+fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
+    // Use a hardcoded "broken file" SVG with red X pattern
+    const FALLBACK_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 256 256\"><g><line stroke-width=\"2\" stroke=\"#ff0000\" y2=\"256\" x2=\"0\" y1=\"0\" x1=\"256\" fill=\"none\"/><line stroke-width=\"2\" y2=\"256\" x2=\"256\" y1=\"0\" x1=\"0\" stroke=\"#ff0000\" fill=\"none\"/></g></svg>";
+    
+    // Try to render the fallback SVG using our normal rendering pipeline
+    match render_svg_to_hbitmap(FALLBACK_SVG, size, size) {
+        Ok(hbitmap) => Ok(hbitmap),
+        Err(_) => {
+            // If even the fallback SVG fails to render, create a simple black square as last resort
+            let bmi = Gdi::BITMAPINFO {
+                bmiHeader: Gdi::BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<Gdi::BITMAPINFOHEADER>() as u32,
+                    biWidth: size as i32,
+                    biHeight: -(size as i32), // Negative for top-down DIB
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: Gdi::BI_RGB.0 as u32,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
+            let hbitmap: Gdi::HBITMAP = unsafe {
+                Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0)
+            }?;
+
+            if !dib_data.is_null() {
+                // Fill with solid black (BGRA format: 0xFF000000)
+                let pixel_count = (size * size) as usize;
+                let buffer: &mut [u32] = unsafe {
+                    std::slice::from_raw_parts_mut(dib_data as *mut u32, pixel_count)
+                };
+                
+                // Solid black with full alpha
+                buffer.fill(0xFF000000);
+            }
+
+            Ok(hbitmap)
+        }
+    }
+}
 
 // =================================================================
 //                      COM Class Factory
