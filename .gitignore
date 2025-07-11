@@ -11,6 +11,8 @@ TestSvgFiles
 **/*.msi
 **/*.wixpdb
 **/_*
+Build-And-Test-Tools/MSI Installer/ResourceHacker.exe
+Build-And-Test-Tools/MSI Installer/ResourceHacker.ini
 
 # Rust Related
 /target
