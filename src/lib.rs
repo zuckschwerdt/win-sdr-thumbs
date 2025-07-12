@@ -736,24 +736,25 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
 
             // Check for GZIP magic number (0x1F 0x8B) to detect SVGZ files
             let is_compressed = svg_data.len() >= 2 && svg_data[0] == 0x1F && svg_data[1] == 0x8B;
-
-            let processed_svg_data = if is_compressed {
-                // Skip CSS processing for compressed SVGZ files - Direct2D can handle them directly
-                svg_data.to_vec()
+               
+            let processed_svg_data: Vec<u8>;
+            // Skip CSS processing for compressed SVGZ files - Direct2D can handle them directly
+            if is_compressed {
+                processed_svg_data = svg_data.to_vec();
             } else {
                 let (css_content, cleaned_svg_data) = extract_css_from_svg_data(svg_data)?;
 
                 // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
                 if css_content.trim().is_empty() {
                     // No CSS to process, but we might have cleaned !important from inline styles
-                    cleaned_svg_data.into_owned()
+                    processed_svg_data = cleaned_svg_data.into_owned();
                 } else {
                     // CSS content was found, so proceed with the full processing pipeline.
                     let style_map = parse_css_rules(&css_content);
                     // Preprocess the already-cleaned SVG to inline all CSS styles from the map.
-                    preprocess_svg_with_msxml(cleaned_svg_data.as_ref(), &style_map)?
+                    processed_svg_data = preprocess_svg_with_msxml(cleaned_svg_data.as_ref(), &style_map)?;
                 }
-            };
+            }
 
             // Load the (potentially processed) svg data into a memory stream.
             let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(&processed_svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
@@ -797,7 +798,8 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
         unsafe { d2d_context.SetTarget(None) };
         
         // Apply UnPremultiply effect
-        let final_bitmap: ID2D1Bitmap1 = match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
+        let final_bitmap: ID2D1Bitmap1;
+        match unsafe { d2d_context.CreateEffect(&Direct2D::CLSID_D2D1UnPremultiply) } {
             Ok(unpremultiply_effect) => {
                 // Create a second render target bitmap for the UnPremultiply effect output
                 let output_bitmap: ID2D1Bitmap1 = unsafe { d2d_context.CreateBitmap(D2D_SIZE_U { width: requested_width, height: requested_height }, None, 0, &bitmap_props_rt) }?;
@@ -826,11 +828,11 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
                 unsafe { d2d_context.SetTarget(None) };
                 
                 // Return the output bitmap from the UnPremultiply effect
-                output_bitmap
+                final_bitmap = output_bitmap
             }
             Err(_) => {
                 // Fall back to original bitmap if effect creation fails
-                render_target_bitmap
+                final_bitmap = render_target_bitmap
             }
         };
 
