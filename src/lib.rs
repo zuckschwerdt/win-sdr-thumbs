@@ -66,6 +66,9 @@ macro_rules! ffi_guard {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => Err(e),
             Err(_) => {
+                D2D_FACTORY.with(|f| f.borrow_mut().take());
+                D2D_DEVICE.with(|d| d.borrow_mut().take());
+                D2D_CONTEXT.with(|c| c.borrow_mut().take());
                 //log_message("A PANIC occurred in FFI function.");
                 Err(E_FAIL.into())
             }
@@ -78,6 +81,9 @@ macro_rules! ffi_guard {
         match result {
             Ok(hr) => hr,
             Err(_) => {
+                D2D_FACTORY.with(|f| f.borrow_mut().take());
+                D2D_DEVICE.with(|d| d.borrow_mut().take());
+                D2D_CONTEXT.with(|c| c.borrow_mut().take());
                 //log_message("A PANIC occurred in FFI function.");
                 E_FAIL
             }
@@ -90,6 +96,9 @@ macro_rules! ffi_guard {
         match result {
             Ok(success) => success.into(),
             Err(_) => {
+                D2D_FACTORY.with(|f| f.borrow_mut().take());
+                D2D_DEVICE.with(|d| d.borrow_mut().take());
+                D2D_CONTEXT.with(|c| c.borrow_mut().take());
                 //log_message("A PANIC occurred in FFI function.");
                 false.into()
             }
