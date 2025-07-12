@@ -770,14 +770,42 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
 
             // Get the root <svg> element from the document, so we can get or change the top level attributes such as width, height, viewbox, etc.
             if let Ok(root_element) = unsafe { svg_doc.GetRoot() } {
-                // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox, which we have set to the size of the bitmap/thumbnail
+                // Apparently if there are no width and height attributes, DrawSvgDocument will automatically scale it to the viewbox
                 // So we can just remove them from before drawing, and it will autoscale and fill the thumbnail.
+                //      IMPORTANT: ViewBox is not the same as ViewPort (which is actually just the height/width attributes).
+                // HOWEVER, if there is no viewbox, it could cause issues with scaling. So if there is no viewbox but there are original width and height attributes,
+                //      we can set the viewbox to "0 0 width height" to make it more likely to scale correctly.
+                // Also apparently even though we apparently set the width and height of the viewport when creating the SVG document, it retains the original width and height attributes when using GetAttributeValue3
                 unsafe {
-                    // DEBUG - Maybe useful later: Get the width and height attributes from the root element
+                    // // DEBUG - Maybe useful later: Get the width and height attributes from the root element
                     // let mut width_buffer = [0u16; 32]; // Buffer for width string
                     // let mut height_buffer = [0u16; 32]; // Buffer for height string
                     // let width_result = root_element.GetAttributeValue3(&BSTR::from("width"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut width_buffer);
                     // let height_result = root_element.GetAttributeValue3(&BSTR::from("height"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut height_buffer);
+                    // // Print the width and height attributes if they exist
+                    // if width_result.is_ok() {
+                    //     let width_str = String::from_utf16_lossy(&width_buffer).trim_end_matches('\0').to_string();
+                    //     if !width_str.is_empty() { println!("SVG Width: {}", width_str); }
+                    // }
+                    // if height_result.is_ok() {
+                    //     let height_str = String::from_utf16_lossy(&height_buffer).trim_end_matches('\0').to_string();
+                    //     if !height_str.is_empty() { println!("SVG Height: {}", height_str); }
+                    // }
+
+                    // If there is no viewbox, but there is a width and height, set the viewbox to "0 0 width height" before removing the attributes.
+                    let mut viewbox_buffer = [0u16; 64]; // Buffer for viewBox string
+                    if root_element.GetAttributeValue3(&BSTR::from("viewBox"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut viewbox_buffer).is_err() {
+                        let mut width_buffer = [0u16; 32]; // Buffer for width string
+                        let mut height_buffer = [0u16; 32]; // Buffer for height string
+                        let width_result = root_element.GetAttributeValue3(&BSTR::from("width"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut width_buffer);
+                        let height_result = root_element.GetAttributeValue3(&BSTR::from("height"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &mut height_buffer);
+
+                        if width_result.is_ok() && height_result.is_ok() {
+                            let width_str = String::from_utf16_lossy(&width_buffer).trim_end_matches('\0').to_string();
+                            let height_str = String::from_utf16_lossy(&height_buffer).trim_end_matches('\0').to_string();
+                            let _ = root_element.SetAttributeValue3(&BSTR::from("viewBox"), D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &BSTR::from(format!("0 0 {} {}", width_str, height_str)));
+                        }
+                    }
 
                     // Remove width, height and viewBox attributes if they exist
                     let _ = root_element.RemoveAttribute(w!("height"));
