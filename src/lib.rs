@@ -279,24 +279,20 @@ impl Drop for VariantGuard {
 }
 
 impl VariantGuard {
-    /// Safely attempts to get a clone of the BSTR from the VARIANT.
+    /// Attempts to extract a String from the VARIANT if it contains a BSTR.
     ///
     /// Returns:
-    /// - `Ok(Some(BSTR))` if the variant is a `VT_BSTR`.
+    /// - `Ok(Some(String))` if the variant is a `VT_BSTR`.
     /// - `Ok(None)` if the variant is `VT_EMPTY` or `VT_NULL`.
-    /// - `Err` if the variant is of any other type.
-    pub fn try_as_bstr(&self) -> Result<Option<BSTR>> {
+    /// - `Err` if the variant is any other type.
+    pub fn try_as_string(&self) -> Result<Option<String>> {
         // This entire operation is unsafe because we are manually interpreting a C-style union.
-        unsafe {
             // Access the variant type tag `vt` directly. It is already a `VARENUM` type, so no casting or construction is needed.
-            match self.0.Anonymous.Anonymous.vt {
+        match unsafe { self.0.Anonymous.Anonymous.vt } {
                 VT_BSTR => {
                     // It's a BSTR. The `bstrVal` field is valid.
-                    let bstr = &self.0.Anonymous.Anonymous.Anonymous.bstrVal;
-
-                    // The BSTR inside the VARIANT is wrapped in ManuallyDrop, meaning we don't have ownership. To return an owned BST that the caller can use, we must clone it.
-                    // The BSTR::clone() method correctly calls SysAllocString.
-                    Ok(Some((**bstr).clone()))
+                let bstr = unsafe { &self.0.Anonymous.Anonymous.Anonymous.bstrVal };
+                Ok(Some(bstr.to_string()))
                 }
                 VT_EMPTY | VT_NULL => {
                     // The attribute exists but is empty. This is a valid, non-error state. We represent this as `None`.
@@ -305,7 +301,6 @@ impl VariantGuard {
                 _ => {
                     // The variant holds a different type (e.g., a number). This is an unexpected state for a 'style' attribute. We return an error to indicate this.
                     Err(Error::new(E_INVALIDARG, "Variant was not a string type."))
-                }
             }
         }
     }
@@ -559,9 +554,7 @@ fn strip_important_from_inline_styles(dom: &MsXml::IXMLDOMDocument2) -> Result<(
             if let Ok(element) = node.cast::<IXMLDOMElement>() {
                 if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
                     let style_variant = VariantGuard(style_variant_raw);
-                    if let Ok(Some(bstr)) = style_variant.try_as_bstr() {
-                        let raw_style = bstr.to_string();
-                        
+                    if let Ok(Some(raw_style)) = style_variant.try_as_string() {
                         // Only process if this style attribute contains !important
                         if raw_style.contains("!important") {
                             let cleaned_style = raw_style.replace("!important", "");
@@ -674,10 +667,8 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
                     // Check if the element *already* has an inline `style="..."` attribute.
                     if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
                         let style_variant = VariantGuard(style_variant_raw);
-
-                        if let Ok(Some(bstr)) = style_variant.try_as_bstr() {
-                            // The conversion from BSTR to String is now safe.
-                            existing_style = bstr.to_string();
+                        if let Ok(Some(style_string)) = style_variant.try_as_string() {
+                            existing_style = style_string;
                             // To preserve existing styles, we need to append them. Ensure there's a semicolon separator.
                             if !existing_style.is_empty() && !existing_style.ends_with(';') {
                                 existing_style.push(';');
