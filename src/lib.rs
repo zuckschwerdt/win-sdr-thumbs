@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::HashMap,
     ffi::OsStr,
@@ -467,10 +468,15 @@ fn normalize_css_properties(properties: &str) -> String {
 }
 
 /// Extracts CSS content from all <style> tags within an SVG using the MSXML parser.
-/// Returns a single string containing all found CSS rules.
-fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<String> {
+/// Returns both the CSS rules and the cleaned SVG data with !important stripped.
+fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)> {
     // MSXML is a COM library, so COM must be initialized on the current thread.
     let _com_guard = ComGuard::new()?;
+
+    // First, do a quick check on the entire SVG data to see if !important exists anywhere, to know whether further processing is needed for that
+    // If so we'll want to remove !important from inline styles as well, because apparently Direct2D won't render any attributes with it.
+    let svg_string = String::from_utf8_lossy(svg_data);
+    let found_important = svg_string.contains("!important");
 
     // Create an instance of the MSXML6 DOM Document object.
     let dom: MsXml::IXMLDOMDocument2 = unsafe { Com::CoCreateInstance(&DOMDocument60, None, Com::CLSCTX_INPROC_SERVER)? };
@@ -486,8 +492,8 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<String> {
     let success = unsafe { dom.load(&stream_variant)? };
     if success != VARIANT_TRUE {
         // If loading fails, it might not be a valid XML/SVG. The original string-based parser was also lenient.
-        // Instead of failing the entire render, we'll treat this as "no CSS found" and return an empty string.
-        return Ok(String::new());
+        // Instead of failing the entire render, we'll treat this as "no CSS found" and return the original data.
+        return Ok((String::new(), Cow::Borrowed(svg_data)));
     }
 
     // Use a namespace-agnostic XPath query to find all <style> elements. This is necessary because
@@ -500,14 +506,67 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<String> {
             // The .text property of a node gets the concatenated text content of the node and its children.
             // For a <style> element, this is exactly the CSS code inside it.
             if let Ok(css_bstr) = unsafe { node.text() } {
-                combined_css.push_str(&css_bstr.to_string());
+                let css_text = css_bstr.to_string();
+                // Strip "!important" declarations from CSS content only - not needed for SVGs and can cause rendering issues
+                let cleaned_css = css_text.replace("!important", "");
+                
+                // Update the original node with the cleaned CSS to prevent issues during SVG processing
+                if cleaned_css != css_text {
+                    let _ = unsafe { node.Settext(&BSTR::from(cleaned_css.clone())) };
+                }
+                
+                combined_css.push_str(&cleaned_css);
                 combined_css.push('\n'); // Add a newline for separation.
             }
         }
     }
     
-    Ok(combined_css)
+    // If we found !important anywhere in the SVG, also check for it in inline style attributes.
+    // This is an expensive operation, so we only do it when we see !important anywhere in the data.
+    let svg_data_to_return = if found_important {
+        strip_important_from_inline_styles(&dom)?;
+        let modified_xml_bstr = unsafe { dom.xml()? };
+        Cow::Owned(modified_xml_bstr.to_string().into_bytes())
+    } else {
+        Cow::Borrowed(svg_data) // No copy when unchanged!
+    };
+    
+    Ok((combined_css, svg_data_to_return))
 }
+
+
+/// If we found "!important" anywhere in the SVG, this will specifically look within elements and attributes to remove it from,
+/// instead of just doing a blanket remove it from all text, in case the SVG has some text that legitimately contains "!important" as part of its content.
+fn strip_important_from_inline_styles(dom: &MsXml::IXMLDOMDocument2) -> Result<()> {
+    let bstr_style = BSTR::from("style");
+    
+    // Find all elements that have a style attribute
+    let styled_elements: IXMLDOMNodeList = unsafe { dom.selectNodes(&BSTR::from("//*[@style]"))? };
+    
+    for i in 0..unsafe { styled_elements.length()? } {
+        if let Ok(node) = unsafe { styled_elements.get_item(i) } {
+            if let Ok(element) = node.cast::<IXMLDOMElement>() {
+                if let Ok(style_variant_raw) = unsafe { element.getAttribute(&bstr_style) } {
+                    let style_variant = VariantGuard(style_variant_raw);
+                    if let Ok(Some(bstr)) = style_variant.try_as_bstr() {
+                        let raw_style = bstr.to_string();
+                        
+                        // Only process if this style attribute contains !important
+                        if raw_style.contains("!important") {
+                            let cleaned_style = raw_style.replace("!important", "");
+                            let variant_value = VariantGuard(VARIANT::from(BSTR::from(cleaned_style)));
+                            
+                            let _ = unsafe { element.setAttribute(&bstr_style, &variant_value) };
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 
 /// Applies inline styles to SVG elements based on their class attributes using the MSXML parser.
 /// It loads the SVG, finds elements by class, applies the provided styles, and returns the modified SVG data.
@@ -680,18 +739,17 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
                 // Skip CSS processing for compressed SVGZ files - Direct2D can handle them directly
                 svg_data.to_vec()
             } else {
-                let css_content = extract_css_from_svg_data(svg_data)?;
+                let (css_content, cleaned_svg_data) = extract_css_from_svg_data(svg_data)?;
 
                 // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
                 if css_content.trim().is_empty() {
-                    // No CSS to process, we can use the original SVG data.
-                    // Since the `else` branch returns an owned Vec on success, we convert the original slice to a Vec here to keep the types consistent.
-                    svg_data.to_vec()
+                    // No CSS to process, but we might have cleaned !important from inline styles
+                    cleaned_svg_data.into_owned()
                 } else {
                     // CSS content was found, so proceed with the full processing pipeline.
                     let style_map = parse_css_rules(&css_content);
-                    // Preprocess the SVG to inline all CSS styles from the map. This returns a new SVG data buffer with styles applied as inline `style` attributes.
-                    preprocess_svg_with_msxml(svg_data, &style_map)?
+                    // Preprocess the already-cleaned SVG to inline all CSS styles from the map.
+                    preprocess_svg_with_msxml(cleaned_svg_data.as_ref(), &style_map)?
                 }
             };
 
