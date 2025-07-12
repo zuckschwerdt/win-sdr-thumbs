@@ -8,15 +8,17 @@ A high-performance thumbnail provider for Windows that generates explorer thumbn
   <tbody>
     <tr>
       <td><b>No Third-Party Dependencies</b></td>
-      <td>Built using only official Microsoft-published Rust crates (found in the <a href="https://github.com/microsoft/windows-rs"><code>windows&#8209;rs</code></a> repo).</td>
+      <td>
+        Built using only official Microsoft-published Rust crates (found in the <a href="https://github.com/microsoft/windows-rs"><code>windows&#8209;rs</code></a> repo)
+        <ul>
+          ↳ No unknown code pulled in from an endless tree of dependencies
+        </ul>
+      </td>
     </tr>
     <tr>
-      <td><b>Works Purely Through Windows API</b></td>
+      <td><b>Renders Purely Via the Windows API</b></td>
       <td>
-        Operates purely through the built-in Windows API for rendering and COM integration. Just a single native DLL.
-        <ul>
-          ↳ No third party libraries that may go out of date or add overhead
-        </ul>
+        No separate third party library files that may go out of date or add overhead
       </td>
     </tr>
     <tr>
@@ -39,14 +41,25 @@ Note: Also see [current limitations](#current-limitations) section
 </p>
 
 # How To Install
+
+### Option 1 (Easiest): Install With WinGet
+Open command prompt and run this command, which will automatically download and run the installer.
+```
+winget install ThioJoe.SvgThumbnailExtension
+```
+
+### Option 2: Download the Installer
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
 2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
 3.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
 
 
-#### Notes:
+#### How To Uninstall:
  - It can be uninstalled like any other app in Windows' Installed Apps list
- - To manually register the DLL yourself instead of using the installer, see these instructions [here](#how-to-manually-register-dll-yourself-advanced).
+
+<p align="center">
+ <img width="386" height="204" alt="image" src="https://github.com/user-attachments/assets/2a2cc628-7d5f-4077-925a-37b59f0a4725" />
+</p>
 
 ------
 
@@ -68,8 +81,9 @@ When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with thi
     * Then because the Direct2D API *does* support in-line style strings, the code does some rudimentary CSS parsing and applies the styles to each individual element (also using MSXML) before passing it to the Direct2D API.
 4.  **Direct2D Rendering**:
     * The provider uses the **Direct2D** graphics API for high-performance, hardware-accelerated rendering.
-    * It creates a GPU-based bitmap to serve as a render target.
+    * First it creates a GPU-based bitmap to serve as a render target.
     * The Direct2D API turns the SVG data into a `SvgDocument` object. The `viewport` attribute is set to the thumbnail size requested by Explorer.
+      * Fun fact: Though undocumented, the Direct2D API also will accept `.svgz` data, which is simply gzip-compressed svg data
     * The `width` and `height` attributes are removed from the root `<svg>` element before drawing, which I discovered causes the `DrawSvgDocument` method to autoscale the image to the viewport, avoiding the need to do any manual scaling to fill the thumbnail.
     * The `SvgDocument` is then drawn onto the render target bitmap.
     * The `unpremultiply` effect is then applied to the bitmap, because the standard Windows GDI requires straight alpha.
