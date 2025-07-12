@@ -333,15 +333,19 @@ fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
         let mut level = 1;
         let mut in_string: Option<char> = None;
         let mut is_escaped = false;
-
-        // Iterate from the character after the opening brace.
-        let mut chars = s[start_pos + 1..].char_indices();
-
+        let start_slice = match start_pos.checked_add(1) {
+            Some(val) if val <= s.len() => &s[val..],
+            _ => return None,
+        };
+        
+        let mut chars = start_slice.char_indices();
         while let Some((i, ch)) = chars.next() {
+
             if is_escaped {
                 is_escaped = false;
                 continue;
             }
+
             if ch == '\\' {
                 is_escaped = true;
                 continue;
@@ -358,9 +362,7 @@ fn parse_css_rules(css_content: &str) -> Vec<(String, String)> {
                     '}' => {
                         level -= 1;
                         if level == 0 {
-                            // i is the byte index within the slice s[start_pos + 1..]
-                            // The absolute index is start_pos + 1 + i
-                            return Some(start_pos + 1 + i);
+                            return start_pos.checked_add(1).and_then(|v| v.checked_add(i));
                         }
                     },
                     _ => {}
