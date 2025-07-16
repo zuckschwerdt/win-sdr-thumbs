@@ -24,6 +24,10 @@ fn main() {
             let dll_path = target_dir.join("win_svg_thumbs_x86.dll");
             println!("cargo:rustc-link-arg=/OUT:{}", dll_path.display());
         },
+        "aarch64" => {
+            let dll_path = target_dir.join("win_svg_thumbs_arm64.dll");
+            println!("cargo:rustc-link-arg=/OUT:{}", dll_path.display());
+        },
         _ => {}
     }
 
