@@ -133,12 +133,59 @@ IF EXIST "%DLL_X86%" (
     echo WARNING: x86 DLL not found at %DLL_X86%
 )
 
+REM Update x86 DLL if it exists
+SET "DLL_ARM64=win_svg_thumbs_arm64.dll"
+IF EXIST "%DLL_ARM64%" (
+    echo Updating version info for ARM64 DLL...
+    REM Create ARM64-specific resource file
+    (
+    echo 1 VERSIONINFO
+    echo FILEVERSION %PRODUCT_VERSION:.=,%
+    echo PRODUCTVERSION %PRODUCT_VERSION:.=,%
+    echo FILEOS 0x4
+    echo FILETYPE 0x1
+    echo {
+    echo BLOCK "StringFileInfo"
+    echo {
+    echo     BLOCK "040904E4"
+    echo     {
+    echo         VALUE "CompanyName", "ThioJoe\0"
+    echo         VALUE "FileDescription", "Thio's SVG Thumbnail Extension\0"
+    echo         VALUE "FileVersion", "%PRODUCT_VERSION%\0"
+    echo         VALUE "ProductName", "Thio's SVG Thumbnail Extension\0"
+    echo         VALUE "InternalName", "Thio's SVG Thumbnail Extension\0"
+    echo         VALUE "LegalCopyright", "Copyright 2025\0"
+    echo         VALUE "OriginalFilename", "win_svg_thumbs_arm64.dll\0"
+    echo         VALUE "ProductVersion", "%PRODUCT_VERSION%\0"
+    echo     }
+    echo }
+    echo.
+    echo BLOCK "VarFileInfo"
+    echo {
+    echo     VALUE "Translation", 0x0409 0x04E4  
+    echo }
+    echo }
+    ) > resources_arm64.rc
+    
+    ResourceHacker.exe -open resources_arm64.rc -save resources_arm64.res -action compile -log CONSOLE
+    ResourceHacker.exe -open "%DLL_ARM64%" -save "%DLL_ARM64%" -resource resources_arm64.res -action addoverwrite -mask VersionInfo, -log CONSOLE
+    IF ERRORLEVEL 1 (
+        echo WARNING: Failed to update arm64 DLL version info
+    ) ELSE (
+        echo Successfully updated arm64 DLL version info
+    )
+) ELSE (
+    echo WARNING: arm64 DLL not found at %DLL_ARM64%
+)
+
 
 REM Clean up temporary files
 IF EXIST resources.rc del resources.rc
 IF EXIST resources.res del resources.res
 IF EXIST resources_x86.rc del resources_x86.rc
 IF EXIST resources_x86.res del resources_x86.res
+IF EXIST resources_arm64.rc del resources_arm64.rc
+IF EXIST resources_arm64.res del resources_arm64.res
 
 echo.
 echo Finished updating version info for DLLs.
