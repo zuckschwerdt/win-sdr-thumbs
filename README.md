@@ -43,15 +43,18 @@ Note: Also see [current limitations](#current-limitations) section
 # How To Install
 
 ### Option 1 (Easiest): Install With WinGet
-Open command prompt and run this command, which will automatically download and run the installer.
-```
-winget install ThioJoe.SvgThumbnailExtension
-```
+1. Open command prompt and run this command, which will automatically download and run the installer.
+    ```
+    winget install ThioJoe.SvgThumbnailExtension
+    ```
+
+2. Then restart Explorer using Task Manager.
 
 ### Option 2: Download the Installer
 1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
 2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
-3.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
+3.  Restart Explorer using Task Manager.
+4.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
 
 
 #### How To Uninstall:
