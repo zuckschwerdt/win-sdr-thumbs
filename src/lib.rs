@@ -1509,6 +1509,15 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
     })
 }
 
+#[no_mangle]
+// Simple function that only notifies the shell of file association changes.
+pub extern "system" fn notify_shell_change() -> HRESULT {
+    ffi_guard!(HRESULT, {
+        // Notify the shell that file associations have changed
+        unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
+        S_OK
+    })
+}
 
 // =================================================================
 

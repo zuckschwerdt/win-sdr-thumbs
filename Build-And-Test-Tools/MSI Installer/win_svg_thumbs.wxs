@@ -9,6 +9,13 @@
     <?define ComponentGuidArm64 = "f44673ee-317d-4d1e-94f6-9b3efd1b50bb" ?>
     <?define ThumbnailProviderShellExGuid = "{E357FCCD-A995-4576-B01F-234630154E96}" ?>
 
+    <!-- Set variables depending on specific 64 bit architecture -->
+    <?if $(sys.BUILDARCH) = x64 ?>
+        <?define ComponentGuid64BitToUse = "$(var.ComponentGuidX64)" ?>
+    <?elseif $(sys.BUILDARCH) = arm64 ?>
+        <?define ComponentGuid64BitToUse = "$(var.ComponentGuidArm64)" ?>
+    <?endif ?>
+
     <Package Name="Thio's SVG Thumbnail Extension" Language="1033" Version="$(var.ProductVersion)" Manufacturer="ThioJoe" UpgradeCode="$(var.UpgradeCodeGuid)">
         <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
@@ -56,23 +63,37 @@
         <UIRef Id="WixUI_Common" />
 
         <Feature Id="ProductFeature" Title="Thio's SVG Thumbnail Extension Title">
+
+
             
-            <!-- ========================= 64-bit DLL Component ========================= -->
-            <?if $(sys.BUILDARCH) = x64 ?>
-            <Component Id="Component_x64" Guid="$(var.ComponentGuidX64)" Bitness="always64" Directory="INSTALLFOLDER_X64">
-                <File Id="File_x64"
-                        Name="win_svg_thumbs_x64.dll"
-                        Source="win_svg_thumbs_x64.dll"
-                        KeyPath="yes" 
-                        Vital="yes"
-                        PatchWholeFile="yes"
-                        />
+            <!-- ========================= 64-bit DLL Component (x64 and ARM64) ========================= -->
+            <Component Id="Component_64bit" Guid="$(var.ComponentGuid64BitToUse)" Bitness="always64" Directory="INSTALLFOLDER_64Bit" >
+                
+                <?if $(sys.BUILDARCH) = x64 ?>
+                    <File Id="File_64bit"
+                            Name="win_svg_thumbs_x64.dll"
+                            Source="win_svg_thumbs_x64.dll"
+                            KeyPath="yes" 
+                            Vital="yes"
+                            PatchWholeFile="yes"
+                            />
+                <?endif?>
+                
+                <?if $(sys.BUILDARCH) = arm64 ?>
+                    <File Id="File_64bit"
+                            Name="win_svg_thumbs_arm64.dll"
+                            Source="win_svg_thumbs_arm64.dll"
+                            KeyPath="yes" 
+                            Vital="yes"
+                            PatchWholeFile="yes"
+                            />
+                <?endif?>
 
                 <!-- CLSID Registration (64 Bit: Will go under HKCR\CLSID) -->
                 <RegistryKey Root="HKCR" Key="CLSID\$(var.Clsid)">
                     <RegistryValue Value="SVG Thumbnail Provider (Rust)" Type="string" />
                     <RegistryKey Key="InprocServer32">
-                        <RegistryValue Value="[#File_x64]" Type="string" />
+                        <RegistryValue Value="[#File_64bit]" Type="string" />
                         <RegistryValue Name="ThreadingModel" Value="Apartment" Type="string" />
                     </RegistryKey>
                 </RegistryKey>
@@ -87,39 +108,6 @@
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
                 </RegistryKey>
             </Component>
-            <?endif?>
-
-            <!-- ========================= ARM64 DLL Component ========================= -->
-            <?if $(sys.BUILDARCH) = arm64 ?>
-            <Component Id="Component_arm64" Guid="$(var.ComponentGuidArm64)" Bitness="always64" Directory="INSTALLFOLDER_ARM64">
-                <File Id="File_arm64"
-                        Name="win_svg_thumbs_arm64.dll"
-                        Source="win_svg_thumbs_arm64.dll"
-                        KeyPath="yes" 
-                        Vital="yes"
-                        PatchWholeFile="yes"
-                        />
-
-                <!-- CLSID Registration (64 Bit: Will go under HKCR\CLSID) -->
-                <RegistryKey Root="HKCR" Key="CLSID\$(var.Clsid)">
-                    <RegistryValue Value="SVG Thumbnail Provider (Rust)" Type="string" />
-                    <RegistryKey Key="InprocServer32">
-                        <RegistryValue Value="[#File_arm64]" Type="string" />
-                        <RegistryValue Name="ThreadingModel" Value="Apartment" Type="string" />
-                    </RegistryKey>
-                </RegistryKey>
-                
-                <!-- SVG Thumbnail Provider (64 Bit)-->
-                <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
-                    <RegistryValue Value="$(var.Clsid)" Type="string" />
-                </RegistryKey>
-
-                <!-- SVGZ Thumbnail Provider (64 Bit) -->
-                <RegistryKey Root="HKCR" Key=".svgz\shellex\$(var.ThumbnailProviderShellExGuid)">
-                    <RegistryValue Value="$(var.Clsid)" Type="string" />
-                </RegistryKey>
-            </Component>
-            <?endif?>
 
             <!-- ========================= 32-bit DLL Component ========================= -->
             <Component Id="Component_x86" Guid="$(var.ComponentGuidX86)" Bitness="always32" Directory="INSTALLFOLDER_X86">
@@ -152,18 +140,15 @@
             </Component>
 
         </Feature>
+
+        <CustomActionRef Id="NotifyShell_Install" />
+        <CustomActionRef Id="NotifyShell_Uninstall" />
     </Package>
 
     <Fragment>
         <StandardDirectory Id="ProgramFiles64Folder">
-            <Directory Id="ManufacturerFolder_x64" Name="ThioJoe">
-                <Directory Id="INSTALLFOLDER_X64" Name="SVG Thumbnail Extension" />
-            </Directory>
-        </StandardDirectory>
-
-        <StandardDirectory Id="ProgramFiles64Folder">
-            <Directory Id="ManufacturerFolder_arm64" Name="ThioJoe">
-                <Directory Id="INSTALLFOLDER_ARM64" Name="SVG Thumbnail Extension" />
+            <Directory Id="ManufacturerFolder_64Bit" Name="ThioJoe">
+                <Directory Id="INSTALLFOLDER_64Bit" Name="SVG Thumbnail Extension" />
             </Directory>
         </StandardDirectory>
 
@@ -173,4 +158,26 @@
             </Directory>
         </StandardDirectory>
     </Fragment>
+
+    <Fragment>
+        <CustomAction Id="NotifyShell_Install"
+            FileRef="File_64bit"
+            DllEntry="notify_shell_change"
+            Execute="deferred"
+            Return="ignore"
+            />
+
+        <CustomAction Id="NotifyShell_Uninstall"
+            FileRef="File_64bit"
+            DllEntry="notify_shell_change"
+            Execute="deferred"
+            Return="ignore"
+            />
+
+        <InstallExecuteSequence>
+            <Custom Action="NotifyShell_Install" After="WriteRegistryValues" Condition="(NOT Installed)" />
+            <Custom Action="NotifyShell_Uninstall" After="RemoveRegistryValues" Condition="(Installed) AND (NOT UPGRADINGPRODUCTCODE)" />
+        </InstallExecuteSequence>
+    </Fragment>
+
 </Wix>
