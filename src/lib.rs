@@ -23,6 +23,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::{
+            self,
             Direct2D::{
                 *, 
                 self, 
@@ -104,6 +105,36 @@ macro_rules! ffi_guard {
             }
         }
     }};
+}
+
+// RAII wrapper for HBITMAP - automatically calls DeleteObject when dropped
+struct HBitmapGuard(Gdi::HBITMAP);
+
+impl HBitmapGuard {
+    // Create a new guard. Takes ownership of the handle.
+    fn new(handle: Gdi::HBITMAP) -> Self {
+        Self(handle)
+    }
+
+    // Release ownership of the handle (e.g., when transferring to the Shell).
+    fn release(mut self) -> Gdi::HBITMAP {
+        let handle = self.0;
+        // Set the internal handle to null so Drop doesn't delete it.
+        self.0 = Gdi::HBITMAP(std::ptr::null_mut());
+        handle
+    }
+}
+
+impl Drop for HBitmapGuard {
+    fn drop(&mut self) {
+        // Only delete if the handle is not null/invalid (i.e., it hasn't been released).
+        if !self.0.is_invalid() && !self.0.0.is_null() {
+            let success = unsafe { Graphics::Gdi::DeleteObject(Gdi::HGDIOBJ(self.0.0)) };
+            // In a Drop implementation, we can't return an error, so just ignore failure
+            // In production, you might want to log this for debugging
+            let _ = success;
+        }
+    }
 }
 
 // RAII wrapper for COM initialization - automatically calls CoUninitialize when dropped
@@ -889,7 +920,10 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
         }, ..Default::default() };
 
         let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hbitmap: Gdi::HBITMAP = unsafe { Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0) }?;
+        let hbitmap_handle: Gdi::HBITMAP = unsafe {
+            Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0)
+        }?;
+        let hbitmap_guard = HBitmapGuard::new(hbitmap_handle);
         
         // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
         if !dib_data.is_null() {
@@ -940,7 +974,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
         // The map_guard will automatically unmap the bitmap when it goes out of scope
         drop(map_guard);
         
-        Ok(hbitmap)
+        Ok(hbitmap_guard.release())
     })();
 
     // Check if the closure returned an error, and if that error was due to a lost device.
@@ -1134,9 +1168,10 @@ fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
             };
 
             let mut dib_data: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbitmap: Gdi::HBITMAP = unsafe {
+            let hbitmap_handle: Gdi::HBITMAP = unsafe {
                 Gdi::CreateDIBSection(None, &bmi, Gdi::DIB_RGB_COLORS, &mut dib_data, None, 0)
             }?;
+            let hbitmap_guard = HBitmapGuard::new(hbitmap_handle);
 
             if !dib_data.is_null() {
                 // Fill with solid black (BGRA format: 0xFF000000)
@@ -1149,7 +1184,7 @@ fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
                 buffer.fill(0xFF000000);
             }
 
-            Ok(hbitmap)
+            Ok(hbitmap_guard.release())
         }
     }
 }
