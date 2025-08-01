@@ -67,9 +67,9 @@ macro_rules! ffi_guard {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(e)) => Err(e),
             Err(_) => {
-                D2D_FACTORY.with(|f| f.borrow_mut().take());
-                D2D_DEVICE.with(|d| d.borrow_mut().take());
-                D2D_CONTEXT.with(|c| c.borrow_mut().take());
+                RESOURCES.with(|resources| {
+                    resources.borrow_mut().take();
+                });
                 //log_message("A PANIC occurred in FFI function.");
                 Err(E_FAIL.into())
             }
@@ -82,9 +82,9 @@ macro_rules! ffi_guard {
         match result {
             Ok(hr) => hr,
             Err(_) => {
-                D2D_FACTORY.with(|f| f.borrow_mut().take());
-                D2D_DEVICE.with(|d| d.borrow_mut().take());
-                D2D_CONTEXT.with(|c| c.borrow_mut().take());
+                RESOURCES.with(|resources| {
+                    resources.borrow_mut().take();
+                });
                 //log_message("A PANIC occurred in FFI function.");
                 E_FAIL
             }
@@ -97,9 +97,9 @@ macro_rules! ffi_guard {
         match result {
             Ok(success) => success.into(),
             Err(_) => {
-                D2D_FACTORY.with(|f| f.borrow_mut().take());
-                D2D_DEVICE.with(|d| d.borrow_mut().take());
-                D2D_CONTEXT.with(|c| c.borrow_mut().take());
+                RESOURCES.with(|resources| {
+                    resources.borrow_mut().take();
+                });
                 //log_message("A PANIC occurred in FFI function.");
                 false.into()
             }
@@ -171,52 +171,37 @@ impl Drop for ComGuard {
 }
 
 // --- Thread-local storage for COM objects that cannot be shared between threads ---
+struct ThreadResources {
+    // D2D resources must be declared first so they are dropped first
+    d2d_factory: Option<ID2D1Factory1>,
+    d2d_device: Option<ID2D1Device>,
+    d2d_context: Option<ID2D1DeviceContext5>,
+    poisoned: bool,
+    
+    // Important: ComGuard must be the last field. This ensures it is dropped last, calling CoUninitialize only after all other COM objects have been released.
+    _com_guard: ComGuard,
+}
+
 thread_local! {
-    static COM_GUARD: RefCell<Option<ComGuard>> = RefCell::new(None);
-    static D2D_FACTORY: RefCell<Option<ID2D1Factory1>> = RefCell::new(None);
-    static D2D_DEVICE: RefCell<Option<ID2D1Device>> = RefCell::new(None);
-    static D2D_CONTEXT: RefCell<Option<ID2D1DeviceContext5>> = RefCell::new(None);
-    // This flag tracks if the D2D resources are in a bad state and need to be recreated.
-    static D2D_RESOURCES_POISONED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static RESOURCES: RefCell<Option<ThreadResources>> = RefCell::new(None);
 }
 /// Initializes and retrieves the thread-local Direct2D and WIC resources.
 /// This function ensures that the heavyweight factory and device objects are created only once per thread.
 fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext5)> {
-    // If the resources were marked as poisoned (like by a previous EndDraw failure), clear the cached device and context. They will be recreated below.
-    if D2D_RESOURCES_POISONED.get() {
-        D2D_DEVICE.with(|d| d.borrow_mut().take());
-        D2D_CONTEXT.with(|c| c.borrow_mut().take());
-        // Reset the flag now that we've cleared the caches.
-        D2D_RESOURCES_POISONED.set(false);
-    }
-
-    // Get or create the Direct2D Factory.
-    let d2d_factory = D2D_FACTORY.with(|factory| -> Result<ID2D1Factory1> {
-        let mut factory_ref = factory.borrow_mut();
-        if factory_ref.is_none() {
-            // Ensure COM is initialized with proper cleanup tracking
-            COM_GUARD.with(|guard| -> Result<()> {
-                let mut guard_ref = guard.borrow_mut();
-                if guard_ref.is_none() {
-                    *guard_ref = Some(ComGuard::new()?);
-                }
-                Ok(())
-            })?;
+    RESOURCES.with(|resources| -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext5)> {
+        let mut resources_ref = resources.borrow_mut();
+        
+        // If resources are poisoned or don't exist, recreate them
+        if resources_ref.is_none() || resources_ref.as_ref().unwrap().poisoned {
+            // Initialize COM and create all resources
+            let com_guard = ComGuard::new()?;
             
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
             };
-            let d2d: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))? };
-            *factory_ref = Some(d2d);
-        }
-        Ok(factory_ref.as_ref().unwrap().clone())
-    })?;
-
-    // Get or create the Direct2D Device. This requires a backing D3D11 device.
-    let d2d_device = D2D_DEVICE.with(|device| -> Result<ID2D1Device> {
-        let mut device_ref = device.borrow_mut();
-        if device_ref.is_none() {
-            // 1. Create the D3D11 Device
+            let d2d_factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))? };
+            
+            // Create the D3D11 Device
             let mut d3d_device: Option<Direct3D11::ID3D11Device> = None;
             unsafe {
                 Direct3D11::D3D11CreateDevice(
@@ -233,25 +218,33 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             }
             let dxgi_device: Dxgi::IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
 
-            // 2. Create the D2D Device from the D3D11 device
-            let d2d_dev: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
-            *device_ref = Some(d2d_dev);
-        }
-        Ok(device_ref.as_ref().unwrap().clone())
-    })?;
-
-    // Get or create the Direct2D Device Context (expensive, so cache it)
-    let d2d_context = D2D_CONTEXT.with(|context| -> Result<ID2D1DeviceContext5> {
-        let mut context_ref = context.borrow_mut();
-        if context_ref.is_none() {
+            // Create the D2D Device from the D3D11 device
+            let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
+            
+            // Create the D2D Device Context
             let dc: ID2D1DeviceContext = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
-            let dc5: ID2D1DeviceContext5 = dc.cast()?;
-            *context_ref = Some(dc5);
+            let d2d_context: ID2D1DeviceContext5 = dc.cast()?;
+            
+            // Store all resources in the unified structure
+            *resources_ref = Some(ThreadResources {
+                d2d_factory: Some(d2d_factory.clone()),
+                d2d_device: Some(d2d_device.clone()),
+                d2d_context: Some(d2d_context.clone()),
+                poisoned: false,
+                _com_guard: com_guard,
+            });
+            
+            Ok((d2d_factory, d2d_device, d2d_context))
+        } else {
+            // Resources exist and are not poisoned, return clones
+            let resources = resources_ref.as_ref().unwrap();
+            Ok((
+                resources.d2d_factory.as_ref().unwrap().clone(),
+                resources.d2d_device.as_ref().unwrap().clone(),
+                resources.d2d_context.as_ref().unwrap().clone(),
+            ))
         }
-        Ok(context_ref.as_ref().unwrap().clone())
-    })?;
-
-    Ok((d2d_factory, d2d_device, d2d_context))
+    })
 }
 
 // RAII wrapper for D2D bitmap mapping - automatically unmaps when dropped
@@ -293,7 +286,12 @@ impl<'a> Drop for D2D1DrawGuard<'a> {
         let result = unsafe { self.context.EndDraw(None, None) };
         if let Err(e) = &result {
             if e.code() == D2DERR_RECREATE_TARGET {
-                D2D_RESOURCES_POISONED.set(true);
+                RESOURCES.with(|resources| {
+                    let mut resources_ref = resources.borrow_mut();
+                    if let Some(ref mut res) = *resources_ref {
+                        res.poisoned = true;
+                    }
+                });
             }
         }
     }
@@ -981,7 +979,12 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
     // Set the poisoned flag if so, to force recreation of resources next time.
     if let Err(e) = &result {
         if e.code() == D2DERR_RECREATE_TARGET {
-            D2D_RESOURCES_POISONED.set(true);
+            RESOURCES.with(|resources| {
+                let mut resources_ref = resources.borrow_mut();
+                if let Some(ref mut res) = *resources_ref {
+                    res.poisoned = true;
+                }
+            });
         }
     }
 
