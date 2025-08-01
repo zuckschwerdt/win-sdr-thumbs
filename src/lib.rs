@@ -201,22 +201,40 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             };
             let d2d_factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))? };
             
-            // Create the D3D11 Device
-            let mut d3d_device: Option<Direct3D11::ID3D11Device> = None;
-            unsafe {
-                Direct3D11::D3D11CreateDevice(
-                    None,
-                    Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-                    HMODULE::default(),
-                    Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, // Required for D2D interop
-                    None,
-                    Direct3D11::D3D11_SDK_VERSION,
-                    Some(&mut d3d_device),
-                    None,
-                    None,
-                )?;
+            // Local function to create D3D11 device with specified driver type
+            let create_d3d_device = |driver_type: Direct3D::D3D_DRIVER_TYPE| -> Result<Direct3D11::ID3D11Device> {
+                let mut device: Option<Direct3D11::ID3D11Device> = None;
+                unsafe {
+                    Direct3D11::D3D11CreateDevice(
+                        None,
+                        driver_type,
+                        HMODULE::default(),
+                        Direct3D11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, // Required for D2D interop
+                        None,
+                        Direct3D11::D3D11_SDK_VERSION,
+                        Some(&mut device),
+                        None,
+                        None,
+                    )?;
+                }
+                device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))
+            };
+
+            // Create the D3D11 Device - use registry setting to determine hardware vs WARP
+            let d3d_device: Direct3D11::ID3D11Device;
+            let use_hardware = USE_HARDWARE_ACCELERATION.load(Ordering::Relaxed);
+            
+            if use_hardware {
+                // Try hardware first if enabled in registry, fallback to WARP if it fails
+                match create_d3d_device(Direct3D::D3D_DRIVER_TYPE_HARDWARE) {
+                    Ok(device) => d3d_device = device,
+                    Err(_) => d3d_device = create_d3d_device(Direct3D::D3D_DRIVER_TYPE_WARP)?,
+                }
+            } else {
+                // Default to WARP (software rendering) for stability
+                d3d_device = create_d3d_device(Direct3D::D3D_DRIVER_TYPE_WARP)?;
             }
-            let dxgi_device: Dxgi::IDXGIDevice = d3d_device.ok_or_else(|| Error::new(E_FAIL, "Failed to create D3D11 device"))?.cast()?;
+            let dxgi_device: Dxgi::IDXGIDevice = d3d_device.cast()?;
 
             // Create the D2D Device from the D3D11 device
             let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
@@ -1266,12 +1284,70 @@ impl Com::IClassFactory_Impl for ClassFactory_Impl {
 static DLL_REFERENCES: AtomicU32 = AtomicU32::new(0);
 // A global handle to the DLL module instance - using Option for safer null checking
 static MODULE_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+// Global flag for hardware acceleration preference (defaults to false = WARP)
+static USE_HARDWARE_ACCELERATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn dll_add_ref() {
     DLL_REFERENCES.fetch_add(1, Ordering::Relaxed);
 }
 fn dll_release() {
     DLL_REFERENCES.fetch_sub(1, Ordering::Release);
+}
+
+/// Generic function to read registry values from HKEY_CLASSES_ROOT\.svg
+/// Returns the value as a u32 if it exists and is a valid DWORD, otherwise returns None
+fn read_svg_registry_dword(value_name: &str) -> Option<u32> {
+    let mut svg_key: HKEY = HKEY::default();
+    let result = unsafe { 
+        RegOpenKeyExW(
+            HKEY_CLASSES_ROOT,
+            w!(".svg"),
+            Some(0),
+            KEY_READ,
+            &mut svg_key,
+        )
+    };
+    
+    if result.is_ok() {
+        let svg_key_guard = RegistryKeyGuard(svg_key);
+        
+        let mut value: u32 = 0;
+        let mut value_size = std::mem::size_of::<u32>() as u32;
+        let mut value_type = REG_DWORD;
+        
+        // Convert the value name to a wide string
+        let wide_name = to_pcwstr(value_name);
+        
+        let query_result = unsafe {
+            RegQueryValueExW(
+                svg_key_guard.0,
+                PCWSTR(wide_name.as_ptr()),
+                None,
+                Some(&mut value_type),
+                Some(&mut value as *mut u32 as *mut u8),
+                Some(&mut value_size),
+            )
+        };
+        
+        // Only return the value if it exists, is a DWORD, and has the expected size
+        if query_result.is_ok() && value_type == REG_DWORD && value_size == std::mem::size_of::<u32>() as u32 {
+            return Some(value);
+        }
+    } // Registry key automatically closed here by RegistryKeyGuard
+    
+    return None
+}
+
+/// Checks the registry for the hardware acceleration preference.
+/// Only called once during DLL initialization.
+fn check_hardware_acceleration_registry() {
+    // Default to WARP (software rendering) for stability
+    let use_hardware = match read_svg_registry_dword("win_svg_thumbs_use_hardware") {
+        Some(1) => true,  // Only enable hardware if value exists and equals 1
+        _ => false,       // Default to WARP for any other case (missing, 0, or other values)
+    };
+    
+    USE_HARDWARE_ACCELERATION.store(use_hardware, Ordering::Relaxed);
 }
 
 // This is our thumbnail provider's unique Class ID (CLSID).
@@ -1285,6 +1361,8 @@ extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *
         if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
             //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
             MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Release);
+            // Check registry for hardware acceleration preference once at startup
+            check_hardware_acceleration_registry();
         }
         true
     })
