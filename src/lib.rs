@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     // fs::OpenOptions,
-    // io::Write,
+    io::Write,
     os::windows::prelude::OsStrExt,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::{
@@ -14,8 +14,10 @@ use std::{
             Ordering
         }, 
         Arc,
-        Mutex
+        Mutex,
+        OnceLock
     },
+    path::PathBuf,
 };
 
 use windows::{
@@ -42,11 +44,17 @@ use windows::{
                 *,
                 RegCreateKeyExW,
                 RegSetValueExW,
-            }
+            },
+            SystemInformation::GetLocalTime
         },
-        UI::Shell,
+        UI::Shell::{
+            self,
+            SHGetKnownFolderPath,
+            FOLDERID_Desktop
+        },
         Data::Xml::MsXml,
         Data::Xml::MsXml::*,
+        Globalization::{GetTimeFormatEx, TIME_FORMAT_FLAGS},
     },
 };
 
@@ -137,6 +145,18 @@ impl Drop for HBitmapGuard {
     }
 }
 
+// RAII Guard to automatically free memory from SHGetKnownFolderPath
+struct CoTaskMemFreeGuard(PWSTR);
+
+impl Drop for CoTaskMemFreeGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // This is safe because the pointer was allocated by the COM task allocator
+            unsafe { Com::CoTaskMemFree(Some(self.0 .0 as *const std::ffi::c_void)) };
+        }
+    }
+}
+
 // RAII wrapper for COM initialization - automatically calls CoUninitialize when dropped
 struct ComGuard {
     initialized_by_us: bool,
@@ -193,9 +213,12 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
         
         // If resources are poisoned or don't exist, recreate them
         if resources_ref.is_none() || resources_ref.as_ref().unwrap().poisoned {
+            log_message("get_d2d_resources: Creating new D2D resources");
+            
             // Initialize COM and create all resources
             let com_guard = ComGuard::new()?;
             
+            // log_message("get_d2d_resources: Creating D2D factory");
             let options = D2D1_FACTORY_OPTIONS {
                 debugLevel: D2D1_DEBUG_LEVEL_NONE,
             };
@@ -225,17 +248,26 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             let use_hardware = USE_HARDWARE_ACCELERATION.load(Ordering::Relaxed);
             
             if use_hardware {
+                // log_message("get_d2d_resources: Attempting hardware acceleration (D3D_DRIVER_TYPE_HARDWARE)");
                 // Try hardware first if enabled in registry, fallback to WARP if it fails
                 match create_d3d_device(Direct3D::D3D_DRIVER_TYPE_HARDWARE) {
-                    Ok(device) => d3d_device = device,
-                    Err(_) => d3d_device = create_d3d_device(Direct3D::D3D_DRIVER_TYPE_WARP)?,
+                    Ok(device) => {
+                        log_message("get_d2d_resources: Hardware acceleration succeeded");
+                        d3d_device = device;
+                    },
+                    Err(_) => {
+                        log_message("get_d2d_resources: Hardware acceleration failed, falling back to WARP");
+                        d3d_device = create_d3d_device(Direct3D::D3D_DRIVER_TYPE_WARP)?;
+                    }
                 }
             } else {
+                log_message("get_d2d_resources: Using WARP (software rendering) as configured");
                 // Default to WARP (software rendering) for stability
                 d3d_device = create_d3d_device(Direct3D::D3D_DRIVER_TYPE_WARP)?;
             }
             let dxgi_device: Dxgi::IDXGIDevice = d3d_device.cast()?;
 
+            // log_message("get_d2d_resources: Creating D2D device and context");
             // Create the D2D Device from the D3D11 device
             let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
             
@@ -243,6 +275,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             let dc: ID2D1DeviceContext = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
             let d2d_context: ID2D1DeviceContext5 = dc.cast()?;
             
+            log_message("get_d2d_resources: Successfully created all D2D resources");
             // Store all resources in the unified structure
             *resources_ref = Some(ThreadResources {
                 d2d_factory: Some(d2d_factory.clone()),
@@ -254,6 +287,7 @@ fn get_d2d_resources() -> Result<(ID2D1Factory1, ID2D1Device, ID2D1DeviceContext
             
             Ok((d2d_factory, d2d_device, d2d_context))
         } else {
+            log_message("get_d2d_resources: Reusing existing D2D resources");
             // Resources exist and are not poisoned, return clones
             let resources = resources_ref.as_ref().unwrap();
             Ok((
@@ -523,6 +557,8 @@ fn normalize_css_properties(properties: &str) -> String {
 /// Extracts CSS content from all <style> tags within an SVG using the MSXML parser.
 /// Returns both the CSS rules and the cleaned SVG data with !important stripped.
 fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)> {
+    // log_message(&format!("extract_css_from_svg_data: Processing {} bytes of SVG data", svg_data.len()));
+    
     // MSXML is a COM library, so COM must be initialized on the current thread.
     let _com_guard = ComGuard::new()?;
 
@@ -530,6 +566,12 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)>
     // If so we'll want to remove !important from inline styles as well, because apparently Direct2D won't render any attributes with it.
     let svg_string = String::from_utf8_lossy(svg_data);
     let found_important = svg_string.contains("!important");
+    
+    // if found_important {
+    //     log_message("extract_css_from_svg_data: Found !important declarations in SVG, will clean them");
+    // }
+
+    // log_message("extract_css_from_svg_data: Creating MSXML DOM parser");
 
     // Create an instance of the MSXML6 DOM Document object.
     let dom: MsXml::IXMLDOMDocument2 = unsafe { Com::CoCreateInstance(&DOMDocument60, None, Com::CLSCTX_INPROC_SERVER)? };
@@ -544,10 +586,13 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)>
     // The MSXML parser will read the SVG data directly from our in-memory stream.
     let success = unsafe { dom.load(&stream_variant)? };
     if success != VARIANT_TRUE {
+        log_message("extract_css_from_svg_data: MSXML failed to parse SVG, returning no CSS");
         // If loading fails, it might not be a valid XML/SVG. The original string-based parser was also lenient.
         // Instead of failing the entire render, we'll treat this as "no CSS found" and return the original data.
         return Ok((String::new(), Cow::Borrowed(svg_data)));
     }
+
+    // log_message("extract_css_from_svg_data: Successfully parsed SVG, extracting <style> elements");
 
     // Use a namespace-agnostic XPath query to find all <style> elements. This is necessary because
     // most SVGs define a default namespace (xmlns="..."), which would cause a simple "//style" query to fail.
@@ -565,6 +610,7 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)>
                 
                 // Update the original node with the cleaned CSS to prevent issues during SVG processing
                 if cleaned_css != css_text {
+                    log_message("extract_css_from_svg_data: Cleaned !important from <style> element");
                     let _ = unsafe { node.Settext(&BSTR::from(cleaned_css.clone())) };
                 }
                 
@@ -574,9 +620,12 @@ fn extract_css_from_svg_data(svg_data: &[u8]) -> Result<(String, Cow<'_, [u8]>)>
         }
     }
     
+    // log_message(&format!("extract_css_from_svg_data: Extracted {} bytes of CSS from <style> elements", combined_css.len()));
+    
     // If we found !important anywhere in the SVG, also check for it in inline style attributes.
     // This is an expensive operation, so we only do it when we see !important anywhere in the data.
     let svg_data_to_return = if found_important {
+        // log_message("extract_css_from_svg_data: Processing inline style attributes to remove !important");
         strip_important_from_inline_styles(&dom)?;
         let modified_xml_bstr = unsafe { dom.xml()? };
         Cow::Owned(modified_xml_bstr.to_string().into_bytes())
@@ -622,8 +671,11 @@ fn strip_important_from_inline_styles(dom: &MsXml::IXMLDOMDocument2) -> Result<(
 /// Applies inline styles to SVG elements based on their class attributes using the MSXML parser.
 /// It loads the SVG, finds elements by class, applies the provided styles, and returns the modified SVG data.
 fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) -> Result<Vec<u8>> {
+    // log_message(&format!("preprocess_svg_with_msxml: Processing {} bytes of SVG with {} style rules", svg_data.len(), style_map.len()));
+    
     // Skip it all if there are no styles to apply.
     if style_map.is_empty() {
+        // log_message("preprocess_svg_with_msxml: No styles to apply, returning original SVG");
         return Ok(svg_data.to_vec());
     }
 
@@ -744,25 +796,29 @@ fn preprocess_svg_with_msxml(svg_data: &[u8], style_map: &[(String, String)]) ->
     // The `windows::core::BSTR` type is a smart pointer that will auto-free the string.
     let modified_xml_string = modified_xml_bstr.to_string();
 
-    //DEBUG print the modified XML string log
-    // log_message(modified_xml_string.as_str());
+    log_message(&format!("preprocess_svg_with_msxml: Successfully applied styles, returning {} bytes of modified SVG", modified_xml_string.len()));
 
     // Convert the final string to a byte vector and return it.
     Ok(modified_xml_string.into_bytes())
 }
 
 pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
+    log_message(&format!("render_svg_to_hbitmap: Starting render for {}x{} size, {} bytes of data", requested_width, requested_height, svg_data.len()));
+    
     // Encapsulate main rendering logic in a helper closure.
     // This makes it easier to catch any error, check if it's D2DERR_RECREATE_TARGET, poison the resources if needed, and then return the original error.
     let result = (|| -> Result<Gdi::HBITMAP> {
         // Early validation - avoid work for invalid sizes
         if requested_width == 0 || requested_height == 0 || requested_width > 4096 || requested_height > 4096 {
+            log_message(&format!("render_svg_to_hbitmap: Invalid dimensions: {}x{}", requested_width, requested_height));
             return Err(Error::new(E_INVALIDARG, "Invalid bitmap dimensions"));
         }
 
+        // log_message("render_svg_to_hbitmap: Getting D2D resources");
         // 1. Get resources (now includes cached device context)
         let (_d2d_factory, _d2d_device, d2d_context) = get_d2d_resources()?;
         
+        // log_message("render_svg_to_hbitmap: Creating render target bitmap");
         // 2. Create the D2D RENDER TARGET bitmap (GPU-only)
         let bitmap_props_rt = D2D1_BITMAP_PROPERTIES1 {
             pixelFormat: D2D1_PIXEL_FORMAT { format: Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
@@ -787,22 +843,29 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
             let processed_svg_data: Vec<u8>;
             // Skip CSS processing for compressed SVGZ files - Direct2D can handle them directly
             if is_compressed {
+                // log_message("render_svg_to_hbitmap: Detected SVGZ (compressed) file, skipping CSS processing");
                 processed_svg_data = svg_data.to_vec();
             } else {
+                // log_message("render_svg_to_hbitmap: Processing uncompressed SVG, extracting CSS");
                 let (css_content, cleaned_svg_data) = extract_css_from_svg_data(svg_data)?;
 
                 // If no CSS is found in <style> tags, skip the expensive CSS parsing and MSXML SVG processing steps.
                 if css_content.trim().is_empty() {
+                    // log_message("render_svg_to_hbitmap: No CSS found in <style> tags, using cleaned SVG");
                     // No CSS to process, but we might have cleaned !important from inline styles
                     processed_svg_data = cleaned_svg_data.into_owned();
                 } else {
+                    // log_message(&format!("render_svg_to_hbitmap: Found {} bytes of CSS, processing styles", css_content.len()));
                     // CSS content was found, so proceed with the full processing pipeline.
                     let style_map = parse_css_rules(&css_content);
+                    // log_message(&format!("render_svg_to_hbitmap: Parsed {} CSS rules", style_map.len()));
                     // Preprocess the already-cleaned SVG to inline all CSS styles from the map.
                     processed_svg_data = preprocess_svg_with_msxml(cleaned_svg_data.as_ref(), &style_map)?;
+                    // log_message("render_svg_to_hbitmap: Successfully applied CSS styles to SVG");
                 }
             }
 
+            // log_message("render_svg_to_hbitmap: Creating SVG document from processed data");
             // Load the (potentially processed) svg data into a memory stream.
             let stream: Com::IStream = unsafe { Shell::SHCreateMemStream(Some(&processed_svg_data)) }.ok_or_else(|| Error::new(E_FAIL, "Failed to create memory stream"))?;
             
@@ -990,6 +1053,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
         // The map_guard will automatically unmap the bitmap when it goes out of scope
         drop(map_guard);
         
+        log_message("render_svg_to_hbitmap: Successfully completed rendering");
         Ok(hbitmap_guard.release())
     })();
 
@@ -997,12 +1061,15 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
     // Set the poisoned flag if so, to force recreation of resources next time.
     if let Err(e) = &result {
         if e.code() == D2DERR_RECREATE_TARGET {
+            log_message("render_svg_to_hbitmap: D2D device lost, marking resources as poisoned for recreation");
             RESOURCES.with(|resources| {
                 let mut resources_ref = resources.borrow_mut();
                 if let Some(ref mut res) = *resources_ref {
                     res.poisoned = true;
                 }
             });
+        } else {
+            log_message(&format!("render_svg_to_hbitmap: Error occurred: {:?}", e));
         }
     }
 
@@ -1021,6 +1088,7 @@ struct ThumbnailProvider {
 impl Default for ThumbnailProvider {
     fn default() -> Self {
         dll_add_ref();
+        log_message("ThumbnailProvider: Created new instance");
         Self {
             svg_data: Mutex::new(None),
         }
@@ -1029,6 +1097,7 @@ impl Default for ThumbnailProvider {
 
 impl Drop for ThumbnailProvider {
     fn drop(&mut self) {
+        log_message("ThumbnailProvider: Dropping instance");
         dll_release();
     }
 }
@@ -1036,9 +1105,12 @@ impl Drop for ThumbnailProvider {
 impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
     fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
-        ffi_guard!(Result<()>, {
+        ffi_guard!(Result<()>, {          
+            // log_message("Initialize: Starting SVG data loading");
+            
             // Guard against repeated initialization calls
             if self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
+                log_message("Initialize: Error - Already initialized");
                 return Err(Error::from(HRESULT::from_win32(ERROR_ALREADY_INITIALIZED.0)));
             }
 
@@ -1053,9 +1125,13 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                     let mut statstg = Default::default();
                     if unsafe { stream.Stat(&mut statstg, Com::STATFLAG_NONAME) }.is_ok() {
                         let stream_size = statstg.cbSize;
+                        // log_message(&format!("Initialize: Stream reports size: {} bytes", stream_size));
                         if stream_size > 0 && stream_size > MAX_SIZE {
+                            log_message(&format!("Initialize: Error - File too large: {} bytes (max: {} bytes)", stream_size, MAX_SIZE));
                             return Err(Error::from(HRESULT::from_win32(ERROR_FILE_TOO_LARGE.0)));
                         }
+                    } else {
+                        log_message("Initialize: Warning - Could not get stream size, will read with safety checks");
                     }
 
                     // Do not trust the reported size for allocation.
@@ -1075,26 +1151,32 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                         };
                         
                         if hr.is_err() || bytes_read == 0 {
+                            if hr.is_err() {
+                                log_message(&format!("Initialize: Stream read error: {:?}", hr));
+                            }
                             break;
                         }
                         
                         // Extra file size safety net protects memory usage in case statstg failed or returned a wrong size.
                         if buffer.len() + (bytes_read as usize) > (MAX_SIZE as usize) {
+                            log_message(&format!("Initialize: Error - File too large during read: {} bytes (max: {} bytes)", buffer.len() + (bytes_read as usize), MAX_SIZE));
                             return Err(Error::from(HRESULT::from_win32(ERROR_FILE_TOO_LARGE.0)));
                         }
                         
                         buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                     }
                     
+                    // log_message(&format!("Initialize: Successfully loaded {} bytes of SVG data", buffer.len()));
+                    
                     // Convert to Arc<[u8]> to save memory overhead
                     *self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::from(buffer.into_boxed_slice()));
                     
-                    //log_message("Initialize: Succeeded.");
+                    // log_message("Initialize: Succeeded.");
                     Ok(())
                 }
                 None => {
                     // This case handles if Windows passes a null stream.
-                    //log_message("Initialize: Error - Stream was null.");
+                    log_message("Initialize: Error - Stream was null.");
                     Err(E_INVALIDARG.into())
                 }
             }
@@ -1105,8 +1187,8 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
 impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     #[allow(non_snake_case)]
     fn GetThumbnail(&self, cx: u32, phbmp: *mut Gdi::HBITMAP, pdwalpha: *mut Shell::WTS_ALPHATYPE) -> Result<()> {
-        ffi_guard!(Result<()>, {
-            //log_message("GetThumbnail: Entered.");
+        ffi_guard!(Result<()>, {           
+            // log_message(&format!("GetThumbnail: Entered with size: {}x{}", cx, cx));
 
             // Initialize output parameters to safe defaults (COM contract requirement)
             // pdwalpha is set to UNKNOWN for all failure cases, only changed to ARGB on success
@@ -1121,11 +1203,11 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                 
                 match data_guard.as_ref() {
                     Some(data) => {
-                        //log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
+                        // log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
                         Arc::clone(data) // Clone the Arc (cheap pointer copy)
                     }
                     None => {
-                        //log_message("GetThumbnail: Error - SVG data was not initialized.");
+                        log_message("GetThumbnail: Error - SVG data was not initialized.");
                         return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
                     }
                 }
@@ -1133,29 +1215,29 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 
             match render_svg_to_hbitmap(&svg_data[..], cx, cx) {
                 Ok(hbitmap) => {
-                    //log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
+                    // log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
                     unsafe {
                         *phbmp = hbitmap;
                         *pdwalpha = Shell::WTSAT_ARGB;
                     }
-                    //log_message("GetThumbnail: Succeeded.");
+                    // log_message("GetThumbnail: Succeeded.");
                     Ok(())
                 }
                 Err(e) => {
-                    //log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
+                    log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
                     
                     // Instead of returning an error, create a fallback thumbnail
                     match create_fallback_thumbnail(cx) {
                         Ok(fallback_hbitmap) => {
-                            //log_message("GetThumbnail: Created fallback thumbnail for invalid SVG.");
+                            log_message("GetThumbnail: Created fallback thumbnail for invalid SVG.");
                             unsafe {
                                 *phbmp = fallback_hbitmap;
                                 *pdwalpha = Shell::WTSAT_ARGB;
                             }
                             Ok(())
                         }
-                        Err(_) => {
-                            //log_message("GetThumbnail: Failed to create fallback thumbnail, returning error.");
+                        Err(fallback_err) => {
+                            log_message(&format!("GetThumbnail: Failed to create fallback thumbnail: {:?}", fallback_err));
                             Err(e) // Only return error if we can't even create a fallback
                         }
                     }
@@ -1167,13 +1249,19 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
 
 /// Creates a simple fallback thumbnail for invalid SVG files
 fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
+    // log_message(&format!("create_fallback_thumbnail: Creating fallback thumbnail of size {}x{}", size, size));
+    
     // Use a hardcoded "broken file" SVG with red X pattern
     const FALLBACK_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 256 256\"><g><line stroke-width=\"2\" stroke=\"#ff0000\" y2=\"256\" x2=\"0\" y1=\"0\" x1=\"256\" fill=\"none\"/><line stroke-width=\"2\" y2=\"256\" x2=\"256\" y1=\"0\" x1=\"0\" stroke=\"#ff0000\" fill=\"none\"/></g></svg>";
     
     // Try to render the fallback SVG using our normal rendering pipeline
     match render_svg_to_hbitmap(FALLBACK_SVG, size, size) {
-        Ok(hbitmap) => Ok(hbitmap),
-        Err(_) => {
+        Ok(hbitmap) => {
+            log_message("create_fallback_thumbnail: Successfully created SVG-based fallback");
+            Ok(hbitmap)
+        },
+        Err(e) => {
+            log_message(&format!("create_fallback_thumbnail: SVG fallback failed: {:?}, creating bitmap fallback", e));
             // If even the fallback SVG fails to render, create a simple black square as last resort
             let bmi = Gdi::BITMAPINFO {
                 bmiHeader: Gdi::BITMAPINFOHEADER {
@@ -1205,6 +1293,7 @@ fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
                 buffer.fill(0xFF000000);
             }
 
+            log_message("create_fallback_thumbnail: Successfully created bitmap-based fallback");
             Ok(hbitmap_guard.release())
         }
     }
@@ -1220,12 +1309,14 @@ struct ClassFactory;
 impl Default for ClassFactory {
     fn default() -> Self {
         dll_add_ref();
+        log_message("ClassFactory: Created new instance");
         Self {}
     }
 }
 
 impl Drop for ClassFactory {
     fn drop(&mut self) {
+        log_message("ClassFactory: Dropping instance");
         dll_release();
     }
 }
@@ -1233,31 +1324,33 @@ impl Drop for ClassFactory {
 impl Com::IClassFactory_Impl for ClassFactory_Impl {
     #[allow(non_snake_case)]
     fn CreateInstance(&self, punkouter: Ref<'_, IUnknown>, riid: *const GUID, ppvobject: *mut *mut std::ffi::c_void) -> Result<()> {
-        ffi_guard!(Result<()>, {
-            //log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
+        ffi_guard!(Result<()>, {           
+            // log_message(&format!("ClassFactory::CreateInstance: Entered. Requesting interface: {:?}", unsafe { *riid }));
 
             // Safety checks for null pointers
             if riid.is_null() || ppvobject.is_null() {
+                log_message("ClassFactory::CreateInstance: Error - Null pointer passed");
                 return Err(Error::new(E_POINTER, "Null pointer passed to CreateInstance"));
             }
 
             // We do not support aggregation.
             if !punkouter.is_null() {
-                //log_message("ClassFactory::CreateInstance: Error - Aggregation not supported.");
+                log_message("ClassFactory::CreateInstance: Error - Aggregation not supported.");
                 return Err(Error::new(CLASS_E_NOAGGREGATION, "Aggregation not supported"));
             }
+            
+            log_message("ClassFactory::CreateInstance: Creating ThumbnailProvider instance");
             
             // Create an instance of our ThumbnailProvider
             let thumbnail_provider: IUnknown = ThumbnailProvider::default().into();
             
             // Query for the interface requested by the caller and return it.
             let hr: HRESULT = unsafe { thumbnail_provider.query(&*riid, ppvobject) };
-
-            //log_message(&format!("ClassFactory::CreateInstance: Exiting with HRESULT: {:?}", hr));
-            
+         
             if hr.is_ok() {
                 Ok(())
             } else {
+                log_message(&format!("ClassFactory::CreateInstance: Error - Exiting with HRESULT: {:?}", hr));
                 Err(Error::new(hr, "Failed to query interface"))
             }
         })
@@ -1267,8 +1360,10 @@ impl Com::IClassFactory_Impl for ClassFactory_Impl {
     fn LockServer(&self, flock: BOOL) -> Result<()> {
         ffi_guard!(Result<()>, {
             if flock.as_bool() {
+                log_message("ClassFactory::LockServer: Locking server (adding reference)");
                 dll_add_ref();
             } else {
+                log_message("ClassFactory::LockServer: Unlocking server (releasing reference)");
                 dll_release();
             }
             Ok(())
@@ -1286,12 +1381,18 @@ static DLL_REFERENCES: AtomicU32 = AtomicU32::new(0);
 static MODULE_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 // Global flag for hardware acceleration preference (defaults to false = WARP)
 static USE_HARDWARE_ACCELERATION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Global flag for whether to enable debug logging
+static ENABLE_DEBUG_LOGGING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// A global OnceLock for the log file path, initialized only once
+static LOG_FILE_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fn dll_add_ref() {
-    DLL_REFERENCES.fetch_add(1, Ordering::Relaxed);
+    let new_count = DLL_REFERENCES.fetch_add(1, Ordering::Relaxed) + 1;
+    log_message(&format!("DLL reference added. New count: {}", new_count));
 }
 fn dll_release() {
-    DLL_REFERENCES.fetch_sub(1, Ordering::Release);
+    let old_count = DLL_REFERENCES.fetch_sub(1, Ordering::Release);
+    log_message(&format!("DLL reference released. New count: {}", old_count - 1));
 }
 
 /// Generic function to read registry values from HKEY_CLASSES_ROOT\.svg
@@ -1332,22 +1433,52 @@ fn read_svg_registry_dword(value_name: &str) -> Option<u32> {
         // Only return the value if it exists, is a DWORD, and has the expected size
         if query_result.is_ok() && value_type == REG_DWORD && value_size == std::mem::size_of::<u32>() as u32 {
             return Some(value);
+        } else if !query_result.is_ok() {
+            log_message(&format!("Registry read failed for '{}': {:?}", value_name, query_result));
         }
     } // Registry key automatically closed here by RegistryKeyGuard
     
     return None
 }
 
-/// Checks the registry for the hardware acceleration preference.
-/// Only called once during DLL initialization.
+// Checks the registry for the hardware acceleration preference.
+// Only called once during DLL initialization.
 fn check_hardware_acceleration_registry() {
+    // log_message("Checking registry for hardware acceleration preference...");
+    
     // Default to WARP (software rendering) for stability
     let use_hardware = match read_svg_registry_dword("win_svg_thumbs_use_hardware") {
-        Some(1) => true,  // Only enable hardware if value exists and equals 1
-        _ => false,       // Default to WARP for any other case (missing, 0, or other values)
+        Some(1) => {
+            log_message("Registry: Hardware acceleration ENABLED");
+            true  // Only enable hardware if value exists and equals 1
+        },
+        Some(value) => {
+            log_message(&format!("Registry: Hardware acceleration disabled (value: {})", value));
+            false
+        },
+        None => {
+            log_message("Registry: Hardware acceleration preference not found, defaulting to WARP (software)");
+            false       // Default to WARP for any other case (missing, 0, or other values)
+        }
     };
     
     USE_HARDWARE_ACCELERATION.store(use_hardware, Ordering::Relaxed);
+}
+
+// Checks registry for setting for whether to enable debug logging
+fn check_debug_logging_registry() {
+    // Note: We can't log here initially since logging might not be enabled yet
+    let enable_debug = match read_svg_registry_dword("win_svg_thumbs_enable_debug_log") {
+        Some(1) => true,  // Only enable debug logging if value exists and equals 1
+        _ => false,       // Default to disabled for any other case (missing, 0, or other values)
+    };
+    
+    ENABLE_DEBUG_LOGGING.store(enable_debug, Ordering::Relaxed);
+    
+    // Now we can log since the flag is set
+    if enable_debug {
+        log_message("Debug logging ENABLED via registry");
+    }
 }
 
 // This is our thumbnail provider's unique Class ID (CLSID).
@@ -1359,10 +1490,15 @@ const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xa884a812_58fd_47d5_
 extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *const std::ffi::c_void) -> BOOL {
     ffi_guard!(BOOL, {
         if fdw_reason == System::SystemServices::DLL_PROCESS_ATTACH {
-            //log_message("DllMain: DLL_PROCESS_ATTACH received. DLL is loaded.");
             MODULE_HANDLE.store(hinst_dll.0 as *mut _, Ordering::Release);
             // Check registry for hardware acceleration preference once at startup
             check_hardware_acceleration_registry();
+            // Check registry for debug logging preference once at startup
+            check_debug_logging_registry();
+            
+            log_message("DllMain: DLL_PROCESS_ATTACH completed. DLL is loaded and initialized.");
+        } else if fdw_reason == System::SystemServices::DLL_PROCESS_DETACH {
+            log_message("DllMain: DLL_PROCESS_DETACH received. DLL is unloading.");
         }
         true
     })
@@ -1372,16 +1508,25 @@ extern "system" fn DllMain(hinst_dll: HMODULE, fdw_reason: u32, _lpv_reserved: *
 #[allow(non_snake_case)]
 pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID, ppv: *mut *mut std::ffi::c_void) -> HRESULT {
     ffi_guard!(HRESULT, {
+        // Check registry settings at entry point in case they changed since DLL load
+        check_debug_logging_registry();
+        check_hardware_acceleration_registry();
+        
+        log_message("DllGetClassObject: Entered");
+        
         // Safety checks for null pointers
         if rclsid.is_null() || riid.is_null() || ppv.is_null() {
+            log_message("DllGetClassObject: Error - Null pointer passed");
             return E_POINTER;
         }
 
         // Check if the caller is asking for our specific class.
         if unsafe { *rclsid } != CLSID_SVG_THUMBNAIL_PROVIDER {
-            //log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
+            log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
             return CLASS_E_CLASSNOTAVAILABLE;
         }
+        
+        log_message("DllGetClassObject: Creating class factory for SVG Thumbnail Provider");
         
         // Create our class factory.
         let factory: Com::IClassFactory = ClassFactory::default().into();
@@ -1392,7 +1537,13 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
         // The factory variable will automatically drop here, releasing our local reference.
         // The caller retains their reference from the query() call.
 
-        //log_message(&format!("DllGetClassObject: Exiting with HRESULT: {:?}", hr));
+        // log_message(&format!("DllGetClassObject: Exiting with HRESULT: {:?}", hr));
+        // Log only if it's an error
+        if hr.is_err() {
+            log_message(&format!("DllGetClassObject: Error - Exiting with HRESULT: {:?}", hr));
+        } else {
+            // log_message("DllGetClassObject: Succeeded.");
+        }
         
         hr
     })
@@ -1402,9 +1553,13 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
 #[allow(non_snake_case)]
 pub extern "system" fn DllCanUnloadNow() -> HRESULT {
     ffi_guard!(HRESULT, {
-        if DLL_REFERENCES.load(Ordering::Acquire) == 0 {
+        let ref_count = DLL_REFERENCES.load(Ordering::Acquire);
+        
+        if ref_count == 0 {
+            log_message("DllCanUnloadNow: Returning S_OK - DLL can be unloaded");
             S_OK
         } else {
+            log_message(&format!("DllCanUnloadNow: Returning S_FALSE - DLL still has {} active references", ref_count));
             S_FALSE
         }
     })
@@ -1421,34 +1576,44 @@ fn to_pcwstr(s: &str) -> Vec<u16> {
 }
 
 fn create_registry_keys() -> Result<()> {
+    log_message("create_registry_keys: Starting registry key creation");
+    
     let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
     let dll_path = get_dll_path()?;
+    log_message(&format!("create_registry_keys: Using CLSID: {} and DLL path: {}", clsid_string, dll_path));
 
     // Create CLSID\{our-clsid}
+    // log_message("create_registry_keys: Creating CLSID root key");
     let clsid_root_key = RegistryKeyGuard::create_root_key(HKEY_CLASSES_ROOT, &w!("CLSID"))?;
 
+    log_message("create_registry_keys: Creating CLSID subkey and setting description");
     let clsid_key = clsid_root_key.create_subkey(&PCWSTR(to_pcwstr(&clsid_string).as_ptr()))?;
     clsid_key.set_string_value("", "SVG Thumbnail Provider (Rust)")?;
 
     // Create CLSID\{our-clsid}\InprocServer32
+    log_message("create_registry_keys: Creating InprocServer32 key");
     let inproc_key = clsid_key.create_subkey(&w!("InprocServer32"))?;
     inproc_key.set_string_value("", &dll_path)?;
     inproc_key.set_string_value("ThreadingModel", "Apartment")?;
 
     // Associate with .svg files
+    log_message("create_registry_keys: Associating with .svg files");
     let svg_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
     let svg_shellex_key = svg_root_key.create_subkey(&w!("shellex"))?;
     let svg_handler_key = svg_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
     svg_handler_key.set_string_value("", &clsid_string)?;
 
     // Associate with .svgz files
+    log_message("create_registry_keys: Associating with .svgz files");
     let svgz_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svgz"))?;
     let svgz_shellex_key = svgz_root_key.create_subkey(&w!("shellex"))?;
     let svgz_handler_key = svgz_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
     svgz_handler_key.set_string_value("", &clsid_string)?;
 
+    // log_message("create_registry_keys: Notifying shell of association changes");
     unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
 
+    // log_message("create_registry_keys: Successfully completed registry key creation");
     Ok(())
 }
 
@@ -1564,8 +1729,10 @@ impl RegistryKeyGuard {
 }
 
 fn delete_registry_keys() -> Result<()> {
-    let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
+    log_message("delete_registry_keys: Starting registry key deletion");
     
+    let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
+    log_message(&format!("delete_registry_keys: Deleting keys for CLSID: {}", clsid_string));
     // Track if we encountered any real errors (not just "not found")
     let mut first_real_error: Option<Error> = None;
     
@@ -1607,9 +1774,16 @@ fn delete_registry_keys() -> Result<()> {
 #[allow(non_snake_case)]
 pub extern "system" fn DllRegisterServer() -> HRESULT {
     ffi_guard!(HRESULT, {
+        // log_message("DllRegisterServer: Starting registration");
         match create_registry_keys() {
-            Ok(_) => S_OK,
-            Err(_) => E_FAIL,
+            Ok(_) => {
+                log_message("DllRegisterServer: Registration succeeded");
+                S_OK
+            },
+            Err(e) => {
+                log_message(&format!("DllRegisterServer: Registration failed: {:?}", e));
+                E_FAIL
+            },
         }
     })
 }
@@ -1618,9 +1792,16 @@ pub extern "system" fn DllRegisterServer() -> HRESULT {
 #[allow(non_snake_case)]
 pub extern "system" fn DllUnregisterServer() -> HRESULT {
     ffi_guard!(HRESULT, {
+        // log_message("DllUnregisterServer: Starting unregistration");
         match delete_registry_keys() {
-            Ok(_) => S_OK,
-            Err(_) => E_FAIL,
+            Ok(_) => {
+                log_message("DllUnregisterServer: Unregistration succeeded");
+                S_OK
+            },
+            Err(e) => {
+                log_message(&format!("DllUnregisterServer: Unregistration failed: {:?}", e));
+                E_FAIL
+            },
         }
     })
 }
@@ -1636,6 +1817,76 @@ pub extern "system" fn notify_shell_change() -> HRESULT {
 }
 
 // =================================================================
+
+// -------------- Logger ----------------
+fn log_message(message: &str) {
+    if !ENABLE_DEBUG_LOGGING.load(Ordering::Relaxed) {
+        return;
+    }
+
+    // get_or_init will only execute the closure ONCE, the very first time it's called.
+    // All subsequent calls will return the cached value instantly.
+    let log_path_option = LOG_FILE_PATH.get_or_init(|| {
+        let known_folder_flags = Shell::KNOWN_FOLDER_FLAG::default(); // Use default flags, no special options
+        let desktop_path_pwstr = match unsafe { SHGetKnownFolderPath(&FOLDERID_Desktop, known_folder_flags, None) } {
+            Ok(path) => path,
+            Err(_) => return None, // Initialization failed, cache 'None'
+        };
+
+        let desktop_path_guard = CoTaskMemFreeGuard(desktop_path_pwstr);
+        
+        let mut path = match unsafe { desktop_path_guard.0.to_string() } {
+            Ok(s) => PathBuf::from(s),
+            Err(_) => return None, // Conversion failed, cache 'None'
+        };
+        
+        path.push("win_svg_thumb_debug_log.txt");
+        Some(path) // Success! Cache the full path.
+        // --- End of one-time execution block ---
+    });
+
+    // Now, use the cached path.
+    // If initialization failed, log_path_option will be &None, and we'll do nothing.
+    if let Some(log_path) = log_path_option {
+        match std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+            Ok(mut file) => {
+                let pid = std::process::id();
+                let tid = std::thread::current().id();
+                let time_str = get_formatted_time_string_win_api();
+
+                let _ = writeln!(file, "[PID: {} | TID: {:?}] [{}] {}", pid, tid, time_str, message);
+            }
+            Err(_) => {
+                // Opening the file failed.
+            }
+        }
+    }
+}
+
+fn get_formatted_time_string_win_api() -> String {
+    let system_time = unsafe { GetLocalTime() };
+    let mut time_buffer = [0u16; 64]; // Buffer for formatted time string
+    let chars_written = unsafe { // Returns the number of characters put into the buffer. If 0 it failed
+        GetTimeFormatEx(
+            None, // Null is LOCALE_NAME_USER_DEFAULT
+            TIME_FORMAT_FLAGS::default(), // Default time format flags
+            Some(&system_time),
+            None, // Use default format
+            Some(&mut time_buffer),
+        )
+    };
+
+    if chars_written > 0 {
+        return String::from_utf16_lossy(&time_buffer[..chars_written as usize - 1]) // -1 to remove null terminator
+    } else {
+        // Fallback if formatting fails
+         return format!("{:02}:{:02}:{:02}.{:03}",
+            system_time.wHour,
+            system_time.wMinute,
+            system_time.wSecond,
+            system_time.wMilliseconds)
+    }
+}
 
 // fn serialize_svg_doc(svg_doc: &ID2D1SvgDocument) {
 //     //TESTING: Serialize the SVG document to inspect its contents with ID2D1SvgDocument::Serialize
@@ -1685,20 +1936,7 @@ pub extern "system" fn notify_shell_change() -> HRESULT {
 //     }
 // }
 
-// // -------------- Logger ----------------
-// fn log_message(message: &str) {
-//     if let Ok(mut file) = std::fs::OpenOptions::new()
-//         .create(true)
-//         .append(true)
-//         .open("C:\\temp\\svg_thumb_log.txt") // Make sure C:\temp exists!
-//     {
-//         let time = std::time::SystemTime::now()
-//             .duration_since(std::time::UNIX_EPOCH)
-//             .unwrap_or_default()
-//             .as_secs();
-//         let _ = writeln!(file, "[{}] {}", time, message);
-//     }
-// }
+
 
 // fn log_message(message: &str) {
 //     println!("{}", message);
