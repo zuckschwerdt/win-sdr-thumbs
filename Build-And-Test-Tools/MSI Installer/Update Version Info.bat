@@ -59,7 +59,7 @@ echo }
 echo.
 echo BLOCK "VarFileInfo"
 echo {
-echo     VALUE "Translation", 0x0409 0x04E4  
+echo     VALUE "Translation", 0x0409 0x04E4
 echo }
 echo }
 ) > resources.rc
@@ -117,11 +117,11 @@ IF EXIST "%DLL_X86%" (
     echo.
     echo BLOCK "VarFileInfo"
     echo {
-    echo     VALUE "Translation", 0x0409 0x04E4  
+    echo     VALUE "Translation", 0x0409 0x04E4
     echo }
     echo }
     ) > resources_x86.rc
-    
+
     ResourceHacker.exe -open resources_x86.rc -save resources_x86.res -action compile -log CONSOLE
     ResourceHacker.exe -open "%DLL_X86%" -save "%DLL_X86%" -resource resources_x86.res -action addoverwrite -mask VersionInfo, -log CONSOLE
     IF ERRORLEVEL 1 (
@@ -162,11 +162,11 @@ IF EXIST "%DLL_ARM64%" (
     echo.
     echo BLOCK "VarFileInfo"
     echo {
-    echo     VALUE "Translation", 0x0409 0x04E4  
+    echo     VALUE "Translation", 0x0409 0x04E4
     echo }
     echo }
     ) > resources_arm64.rc
-    
+
     ResourceHacker.exe -open resources_arm64.rc -save resources_arm64.res -action compile -log CONSOLE
     ResourceHacker.exe -open "%DLL_ARM64%" -save "%DLL_ARM64%" -resource resources_arm64.res -action addoverwrite -mask VersionInfo, -log CONSOLE
     IF ERRORLEVEL 1 (

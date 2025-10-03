@@ -7,14 +7,14 @@ fn main() {
     // Detect target architecture
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     // let target_triple = env::var("TARGET").unwrap();
-    
+
     // Calculate the target directory path
     let binding = PathBuf::from(&out_dir);
     let target_dir = binding
         .ancestors()
         .nth(3) // Go up to target/{target}/{profile}
         .unwrap();
-    
+
     match target_arch.as_str() {
         "x86_64" => {
             let dll_path = target_dir.join("win_svg_thumbs_x64.dll");

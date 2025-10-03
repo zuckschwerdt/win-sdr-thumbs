@@ -68,7 +68,7 @@ fn main() -> Result<()> {
             hbrBackground: HBRUSH((COLOR_WINDOW.0 + 1) as *mut _),
             ..Default::default()
         };
-        
+
         if RegisterClassW(&wc) == 0 {
             return Err(Error::from_win32());
         }

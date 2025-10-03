@@ -21,12 +21,12 @@
         <Media Id="1" Cabinet="cab1.cab" EmbedCab="yes" />
 
         <!-- Define custom banner and dialog bitmaps for the installer -->
-		<WixVariable Id="WixUIDialogBmp" Overridable="yes" Value="Resources\Dialog.png" />
-		<WixVariable Id="WixUIBannerBmp" Overridable="yes" Value="Resources\Banner.png" />
+        <WixVariable Id="WixUIDialogBmp" Overridable="yes" Value="Resources\Dialog.png" />
+        <WixVariable Id="WixUIBannerBmp" Overridable="yes" Value="Resources\Banner.png" />
         <!-- Define the main icon for the installer UI and Add/Remove Programs -->
         <!-- Apparently you have to first define the <Icon> then use that ID for the property. Can't just directly use the icon path in the APPPRODUCTION value -->
-		<Icon Id="MyAppIcon" SourceFile="Resources\icon.ico"/>
-		<Property Id="ARPPRODUCTICON" Value="MyAppIcon" />
+        <Icon Id="MyAppIcon" SourceFile="Resources\icon.ico"/>
+        <Property Id="ARPPRODUCTICON" Value="MyAppIcon" />
 
         <!-- If the installer were to ask for the installation directory, this would show. But currently it doesn't. -->
         <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER_X64" />
@@ -65,25 +65,25 @@
         <Feature Id="ProductFeature" Title="Thio's SVG Thumbnail Extension Title">
 
 
-            
+
             <!-- ========================= 64-bit DLL Component (x64 and ARM64) ========================= -->
             <Component Id="Component_64bit" Guid="$(var.ComponentGuid64BitToUse)" Bitness="always64" Directory="INSTALLFOLDER_64Bit" >
-                
+
                 <?if $(sys.BUILDARCH) = x64 ?>
                     <File Id="File_64bit"
                             Name="win_svg_thumbs_x64.dll"
                             Source="win_svg_thumbs_x64.dll"
-                            KeyPath="yes" 
+                            KeyPath="yes"
                             Vital="yes"
                             PatchWholeFile="yes"
                             />
                 <?endif?>
-                
+
                 <?if $(sys.BUILDARCH) = arm64 ?>
                     <File Id="File_64bit"
                             Name="win_svg_thumbs_arm64.dll"
                             Source="win_svg_thumbs_arm64.dll"
-                            KeyPath="yes" 
+                            KeyPath="yes"
                             Vital="yes"
                             PatchWholeFile="yes"
                             />
@@ -97,7 +97,7 @@
                         <RegistryValue Name="ThreadingModel" Value="Apartment" Type="string" />
                     </RegistryKey>
                 </RegistryKey>
-                
+
                 <!-- SVG Thumbnail Provider (64 Bit)-->
                 <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
@@ -114,7 +114,7 @@
                 <File Id="File_x86"
                         Name="win_svg_thumbs_x86.dll"
                         Source="win_svg_thumbs_x86.dll"
-                        KeyPath="yes" 
+                        KeyPath="yes"
                         Vital="yes"
                         PatchWholeFile="yes"
                         />

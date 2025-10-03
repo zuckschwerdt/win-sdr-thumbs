@@ -9,7 +9,7 @@ Or to build manually, run this command to build the MSI installer, replacing wit
 	wix build win_svg_thumbs.wxs -d ProductVersion="1.0.0.0" -arch x64 -ext WixToolset.UI.wixext
 
 
-Notes: 
+Notes:
 	- It expects the DLL to be two levels up then in "target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll". To change the path of the DLL relative to the .wxs file, open the .wxs file and change the "DllSourcePath" value near the top.
 
 --------------------------------------------------------
@@ -24,7 +24,7 @@ GUIDS used by the MSI Installer and DLL
 		arm64 Component GUID: 	f44673ee-317d-4d1e-94f6-9b3efd1b50bb
 
 	- My Thumbnail Handler CLSID: 		{a884a812-58fd-47d5-bda6-4fab4fabdcd9}
-		
+
 	- Windows IThumbnailProvider CLSID:	{E357FCCD-A995-4576-B01F-234630154E96}
 		(This one is built into Windows and was not generated)
 

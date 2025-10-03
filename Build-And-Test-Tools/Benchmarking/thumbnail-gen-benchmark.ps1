@@ -138,7 +138,7 @@ function Benchmark-Thumbnails {
     }
 
     $stopwatch.Stop()
-    
+
     # --- Create and return a result object ---
     $elapsed = $stopwatch.Elapsed
     $totalFiles = $shellObjects.Count
@@ -162,7 +162,7 @@ $allRunResults = @()
 for ($i = 1; $i -le $numberOfRuns; $i++) {
     Write-Host "`n--- Starting Run $i of $numberOfRuns ---"
     $runResult = Benchmark-Thumbnails -Path $dir -ThumbnailPreset $size -ThumbnailOnly $thumbnailOnly -InCacheOnly $inCacheOnly -ApiPackDllPath $ApiPackDllPath
-    
+
     if ($runResult) {
         $allRunResults += $runResult
         $totalTimeFormatted = "{0:N2}" -f $runResult.TotalSeconds
@@ -177,7 +177,7 @@ for ($i = 1; $i -le $numberOfRuns; $i++) {
 if ($allRunResults.Count -gt 0) {
     $avgTotalTime = $allRunResults.TotalSeconds | Measure-Object -Average | Select-Object -ExpandProperty Average
     $avgOfAvgsPerFile = $allRunResults.AverageMillisecondsPerFile | Measure-Object -Average | Select-Object -ExpandProperty Average
-    
+
     $avgTotalTimeFormatted = "{0:N2}" -f $avgTotalTime
     $avgOfAvgsFormatted = "{0:N2}" -f $avgOfAvgsPerFile
 
@@ -198,7 +198,7 @@ if ($outputSampleFiles) {
     foreach ($file in $sampleFiles) {
         try {
             $shellFile = [Microsoft.WindowsAPICodePack.Shell.ShellFile]::FromFilePath($file.FullName)
-            
+
             # Select the correct property for the sample image
             $thumbnailBitmap = switch ($size) {
                 "Small"      { $shellFile.Thumbnail.SmallBitmap }
@@ -207,12 +207,12 @@ if ($outputSampleFiles) {
                 "ExtraLarge" { $shellFile.Thumbnail.ExtraLargeBitmap }
                 default      { $shellFile.Thumbnail.LargeBitmap }
             }
-            
+
             if ($thumbnailBitmap) {
                 # Save the sample next to the script file
                 $outputFileName = "$($file.BaseName)_thumbnail_$($size)_sample.bmp"
                 $outputPath = Join-Path -Path $PSScriptRoot -ChildPath $outputFileName
-                
+
                 $thumbnailBitmap.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
                 Write-Host " - Saved sample: $outputFileName"
             }
