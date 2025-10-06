@@ -143,8 +143,8 @@ impl Drop for CoTaskMemFreeGuard {
     }
 }
 
-pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
-    log_message(&format!("render_svg_to_hbitmap: Starting render for {}x{} size, {} bytes of data", requested_width, requested_height, svg_data.len()));
+pub fn render_sdr_to_hbitmap(sdr_data: &[u8], requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
+    log_message(&format!("render_sdr_to_hbitmap: Starting render for {}x{} size, {} bytes of data", requested_width, requested_height, sdr_data.len()));
 
     // 7. Create the final GDI HBITMAP
     // This creates a separate GDI bitmap with its own memory buffer
@@ -168,7 +168,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
 
     }
 
-    log_message("render_svg_to_hbitmap: Successfully completed rendering");
+    log_message("render_sdr_to_hbitmap: Successfully completed rendering");
     Ok(hbitmap_guard.release())
 }
 
@@ -178,7 +178,7 @@ pub fn render_svg_to_hbitmap(svg_data: &[u8], requested_width: u32, requested_he
 
 #[implement(Shell::PropertiesSystem::IInitializeWithStream, Shell::IThumbnailProvider)]
 struct ThumbnailProvider {
-    svg_data: Mutex<Option<Arc<[u8]>>>,
+    sdr_data: Mutex<Option<Arc<[u8]>>>,
 }
 
 impl Default for ThumbnailProvider {
@@ -186,7 +186,7 @@ impl Default for ThumbnailProvider {
         dll_add_ref();
         log_message("ThumbnailProvider: Created new instance");
         Self {
-            svg_data: Mutex::new(None),
+            sdr_data: Mutex::new(None),
         }
     }
 }
@@ -202,10 +202,10 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
     #[allow(non_snake_case)]
     fn Initialize(&self, pstream: Ref<'_, Com::IStream>, _grfmode: u32) -> Result<()> {
         ffi_guard!(Result<()>, {
-            // log_message("Initialize: Starting SVG data loading");
+            // log_message("Initialize: Starting SDR data loading");
 
             // Guard against repeated initialization calls
-            if self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
+            if self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
                 log_message("Initialize: Error - Already initialized");
                 return Err(Error::from(HRESULT::from_win32(ERROR_ALREADY_INITIALIZED.0)));
             }
@@ -262,10 +262,10 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                         buffer.extend_from_slice(&chunk[..bytes_read as usize]);
                     }
 
-                    // log_message(&format!("Initialize: Successfully loaded {} bytes of SVG data", buffer.len()));
+                    // log_message(&format!("Initialize: Successfully loaded {} bytes of SDR data", buffer.len()));
 
                     // Convert to Arc<[u8]> to save memory overhead
-                    *self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::from(buffer.into_boxed_slice()));
+                    *self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::from(buffer.into_boxed_slice()));
 
                     // log_message("Initialize: Succeeded.");
                     Ok(())
@@ -294,24 +294,24 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
             }
 
             // Clone the Arc (cheap pointer copy) and release the mutex before rendering to prevent deadlocks
-            let svg_data = {
-                let data_guard = self.svg_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+            let sdr_data = {
+                let data_guard = self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
 
                 match data_guard.as_ref() {
                     Some(data) => {
-                        // log_message(&format!("GetThumbnail: SVG data is {} bytes.", data.len()));
+                        // log_message(&format!("GetThumbnail: SDR data is {} bytes.", data.len()));
                         Arc::clone(data) // Clone the Arc (cheap pointer copy)
                     }
                     None => {
-                        log_message("GetThumbnail: Error - SVG data was not initialized.");
-                        return Err(Error::new(E_UNEXPECTED, "SVG data not initialized"));
+                        log_message("GetThumbnail: Error - SDR data was not initialized.");
+                        return Err(Error::new(E_UNEXPECTED, "SDR data not initialized"));
                     }
                 }
             }; // Mutex lock is released here
 
-            match render_svg_to_hbitmap(&svg_data[..], cx, cx) {
+            match render_sdr_to_hbitmap(&sdr_data[..], cx, cx) {
                 Ok(hbitmap) => {
-                    // log_message("GetThumbnail: render_svg_to_hbitmap succeeded.");
+                    // log_message("GetThumbnail: render_sdr_to_hbitmap succeeded.");
                     unsafe {
                         *phbmp = hbitmap;
                         *pdwalpha = Shell::WTSAT_ARGB;
@@ -320,12 +320,12 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                     Ok(())
                 }
                 Err(e) => {
-                    log_message(&format!("GetThumbnail: render_svg_to_hbitmap failed with error: {:?}", e));
+                    log_message(&format!("GetThumbnail: render_sdr_to_hbitmap failed with error: {:?}", e));
 
                     // Instead of returning an error, create a fallback thumbnail
                     match create_fallback_thumbnail(cx) {
                         Ok(fallback_hbitmap) => {
-                            log_message("GetThumbnail: Created fallback thumbnail for invalid SVG.");
+                            log_message("GetThumbnail: Created fallback thumbnail for invalid SDR.");
                             unsafe {
                                 *phbmp = fallback_hbitmap;
                                 *pdwalpha = Shell::WTSAT_ARGB;
@@ -343,15 +343,15 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
     }
 }
 
-/// Creates a simple fallback thumbnail for invalid SVG files
+/// Creates a simple fallback thumbnail for invalid SDR files
 fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
     // log_message(&format!("create_fallback_thumbnail: Creating fallback thumbnail of size {}x{}", size, size));
 
-    // Use a hardcoded "broken file" SVG with red X pattern
+    // Use a hardcoded "broken file" SDR with red X pattern
     const FALLBACK_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 256 256\"><g><line stroke-width=\"2\" stroke=\"#ff0000\" y2=\"256\" x2=\"0\" y1=\"0\" x1=\"256\" fill=\"none\"/><line stroke-width=\"2\" y2=\"256\" x2=\"256\" y1=\"0\" x1=\"0\" stroke=\"#ff0000\" fill=\"none\"/></g></svg>";
 
     // Try to render the fallback SVG using our normal rendering pipeline
-    match render_svg_to_hbitmap(FALLBACK_SVG, size, size) {
+    match render_sdr_to_hbitmap(FALLBACK_SVG, size, size) {
         Ok(hbitmap) => {
             log_message("create_fallback_thumbnail: Successfully created SVG-based fallback");
             Ok(hbitmap)
@@ -491,20 +491,20 @@ fn dll_release() {
 
 /// Generic function to read registry values from HKEY_CLASSES_ROOT\.svg
 /// Returns the value as a u32 if it exists and is a valid DWORD, otherwise returns None
-fn read_svg_registry_dword(value_name: &str) -> Option<u32> {
-    let mut svg_key: HKEY = HKEY::default();
+fn read_sdr_registry_dword(value_name: &str) -> Option<u32> {
+    let mut sdr_key: HKEY = HKEY::default();
     let result = unsafe {
         RegOpenKeyExW(
             HKEY_CLASSES_ROOT,
             w!(".svg"),
             Some(0),
             KEY_READ,
-            &mut svg_key,
+            &mut sdr_key,
         )
     };
 
     if result.is_ok() {
-        let svg_key_guard = RegistryKeyGuard(svg_key);
+        let sdr_key_guard = RegistryKeyGuard(sdr_key);
 
         let mut value: u32 = 0;
         let mut value_size = std::mem::size_of::<u32>() as u32;
@@ -515,7 +515,7 @@ fn read_svg_registry_dword(value_name: &str) -> Option<u32> {
 
         let query_result = unsafe {
             RegQueryValueExW(
-                svg_key_guard.0,
+                sdr_key_guard.0,
                 PCWSTR(wide_name.as_ptr()),
                 None,
                 Some(&mut value_type),
@@ -538,7 +538,7 @@ fn read_svg_registry_dword(value_name: &str) -> Option<u32> {
 // Checks registry for setting for whether to enable debug logging
 fn check_debug_logging_registry() {
     // Note: We can't log here initially since logging might not be enabled yet
-    let enable_debug = match read_svg_registry_dword("win_sdr_thumbs_enable_debug_log") {
+    let enable_debug = match read_sdr_registry_dword("win_sdr_thumbs_enable_debug_log") {
         Some(1) => true,  // Only enable debug logging if value exists and equals 1
         _ => false,       // Default to disabled for any other case (missing, 0, or other values)
     };
@@ -553,7 +553,7 @@ fn check_debug_logging_registry() {
 
 // This is our thumbnail provider's unique Class ID (CLSID).
 // Use a new GUID for your own projects!
-const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xadfa4c4b_5cfb_4335_be68_d4d60f2ab71f);
+const CLSID_SDR_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xadfa4c4b_5cfb_4335_be68_d4d60f2ab71f);
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -588,12 +588,12 @@ pub extern "system" fn DllGetClassObject(rclsid: *const GUID, riid: *const GUID,
         }
 
         // Check if the caller is asking for our specific class.
-        if unsafe { *rclsid } != CLSID_SVG_THUMBNAIL_PROVIDER {
-            log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SVG_THUMBNAIL_PROVIDER));
+        if unsafe { *rclsid } != CLSID_SDR_THUMBNAIL_PROVIDER {
+            log_message(&format!("DllGetClassObject: Error - CLSID mismatch. Requested: {:?}, Expected: {:?}", unsafe { *rclsid }, CLSID_SDR_THUMBNAIL_PROVIDER));
             return CLASS_E_CLASSNOTAVAILABLE;
         }
 
-        log_message("DllGetClassObject: Creating class factory for SVG Thumbnail Provider");
+        log_message("DllGetClassObject: Creating class factory for SDR Thumbnail Provider");
 
         // Create our class factory.
         let factory: Com::IClassFactory = ClassFactory::default().into();
@@ -645,7 +645,7 @@ fn to_pcwstr(s: &str) -> Vec<u16> {
 fn create_registry_keys() -> Result<()> {
     log_message("create_registry_keys: Starting registry key creation");
 
-    let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
+    let clsid_string = format!("{{{CLSID_SDR_THUMBNAIL_PROVIDER:?}}}");
     let dll_path = get_dll_path()?;
     log_message(&format!("create_registry_keys: Using CLSID: {} and DLL path: {}", clsid_string, dll_path));
 
@@ -655,7 +655,7 @@ fn create_registry_keys() -> Result<()> {
 
     log_message("create_registry_keys: Creating CLSID subkey and setting description");
     let clsid_key = clsid_root_key.create_subkey(&PCWSTR(to_pcwstr(&clsid_string).as_ptr()))?;
-    clsid_key.set_string_value("", "SVG Thumbnail Provider (Rust)")?;
+    clsid_key.set_string_value("", "SDR Thumbnail Provider (Rust)")?;
 
     // Create CLSID\{our-clsid}\InprocServer32
     log_message("create_registry_keys: Creating InprocServer32 key");
@@ -665,10 +665,10 @@ fn create_registry_keys() -> Result<()> {
 
     // Associate with .svg files
     log_message("create_registry_keys: Associating with .svg files");
-    let svg_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
-    let svg_shellex_key = svg_root_key.create_subkey(&w!("shellex"))?;
-    let svg_handler_key = svg_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-    svg_handler_key.set_string_value("", &clsid_string)?;
+    let sdr_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
+    let sdr_shellex_key = sdr_root_key.create_subkey(&w!("shellex"))?;
+    let sdr_handler_key = sdr_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+    sdr_handler_key.set_string_value("", &clsid_string)?;
 
     // Associate with .svgz files
     log_message("create_registry_keys: Associating with .svgz files");
@@ -798,7 +798,7 @@ impl RegistryKeyGuard {
 fn delete_registry_keys() -> Result<()> {
     log_message("delete_registry_keys: Starting registry key deletion");
 
-    let clsid_string = format!("{{{CLSID_SVG_THUMBNAIL_PROVIDER:?}}}");
+    let clsid_string = format!("{{{CLSID_SDR_THUMBNAIL_PROVIDER:?}}}");
     log_message(&format!("delete_registry_keys: Deleting keys for CLSID: {}", clsid_string));
     // Track if we encountered any real errors (not just "not found")
     let mut first_real_error: Option<Error> = None;
