@@ -1840,7 +1840,7 @@ fn log_message(message: &str) {
             Err(_) => return None, // Conversion failed, cache 'None'
         };
 
-        path.push("win_svg_thumb_debug_log.txt");
+        path.push("win_svg_thumbs_debug_log.txt");
         Some(path) // Success! Cache the full path.
         // --- End of one-time execution block ---
     });

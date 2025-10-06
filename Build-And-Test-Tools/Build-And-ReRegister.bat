@@ -34,7 +34,7 @@ cargo build --release --target=aarch64-pc-windows-msvc
 :: Re-register the new DLL version. Only bother re-registering the 64 bit one.
 regsvr32 "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
 
-:: Copy both DLLs to the MSI Installer folder
+:: Copy each DLL to the MSI Installer folder
 copy /Y "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll" "%~dp0MSI Installer\win_svg_thumbs_x64.dll"
 copy /Y "%~dp0..\target\i686-pc-windows-msvc\release\win_svg_thumbs_x86.dll" "%~dp0MSI Installer\win_svg_thumbs_x86.dll"
 copy /Y "%~dp0..\target\aarch64-pc-windows-msvc\release\win_svg_thumbs_arm64.dll" "%~dp0MSI Installer\win_svg_thumbs_arm64.dll"
