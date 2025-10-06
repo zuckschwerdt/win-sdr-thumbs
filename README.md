@@ -53,7 +53,7 @@ winget install ThioJoe.SvgThumbnailExtension
 ### Option 2: Download the Installer
 1.  Go to the [Releases](https://github.com/zuckschwerdt/win-sdr-thumbs/releases) page.
 2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
-3.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
+3.  Windows Explorer will now automatically use this provider to display thumbnails for `.cu8` and `.cs16` files.
 
 
 #### How To Uninstall:

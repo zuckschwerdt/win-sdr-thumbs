@@ -99,12 +99,12 @@
                 </RegistryKey>
 
                 <!-- SVG Thumbnail Provider (64 Bit)-->
-                <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
+                <RegistryKey Root="HKCR" Key=".cu8\shellex\$(var.ThumbnailProviderShellExGuid)">
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
                 </RegistryKey>
 
                 <!-- SVGZ Thumbnail Provider (64 Bit) -->
-                <RegistryKey Root="HKCR" Key=".svgz\shellex\$(var.ThumbnailProviderShellExGuid)">
+                <RegistryKey Root="HKCR" Key=".cs16\shellex\$(var.ThumbnailProviderShellExGuid)">
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
                 </RegistryKey>
             </Component>
@@ -129,12 +129,12 @@
                 </RegistryKey>
 
                 <!-- SVG Thumbnail Provider (32 Bit) -->
-                <RegistryKey Root="HKCR" Key=".svg\shellex\$(var.ThumbnailProviderShellExGuid)">
+                <RegistryKey Root="HKCR" Key=".cu8\shellex\$(var.ThumbnailProviderShellExGuid)">
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
                 </RegistryKey>
 
                 <!-- SVGZ Thumbnail Provider (32 Bit) -->
-                <RegistryKey Root="HKCR" Key=".svgz\shellex\$(var.ThumbnailProviderShellExGuid)">
+                <RegistryKey Root="HKCR" Key=".cs16\shellex\$(var.ThumbnailProviderShellExGuid)">
                     <RegistryValue Value="$(var.Clsid)" Type="string" />
                 </RegistryKey>
             </Component>

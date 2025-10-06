@@ -44,6 +44,12 @@ use windows::{
     },
 };
 
+#[link(name = "triq")]
+#[allow(unused)]
+unsafe extern "C" {
+    fn splt_thumbnail(data: *const u8, data_len: u64, filename: *const std::ffi::c_char, width: u32, height: u32, rgba_pixels: *mut u32) -> bool;
+}
+
 // This is the ONLY definition you need. It works for both 32-bit and 64-bit.
 const WRITE_FLAGS: REG_SAM_FLAGS = KEY_WRITE;
 
@@ -143,7 +149,7 @@ impl Drop for CoTaskMemFreeGuard {
     }
 }
 
-pub fn render_sdr_to_hbitmap(sdr_data: &[u8], requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
+pub fn render_sdr_to_hbitmap(sdr_data: &[u8], sdr_name: &str, requested_width: u32, requested_height: u32) -> Result<Gdi::HBITMAP> {
     log_message(&format!("render_sdr_to_hbitmap: Starting render for {}x{} size, {} bytes of data", requested_width, requested_height, sdr_data.len()));
 
     // 7. Create the final GDI HBITMAP
@@ -161,11 +167,18 @@ pub fn render_sdr_to_hbitmap(sdr_data: &[u8], requested_width: u32, requested_he
 
     // 8. Copy pixels from the mapped D2D buffer to the GDI HBITMAP buffer
     if !dib_data.is_null() {
+        let file_name = std::ffi::CString::new(sdr_name).unwrap();
         // Safety: The bitmap bit values are aligned on doubleword boundaries
         let pixels = dib_data as *mut u32;
-
-        // TODO: Draw pixels
-
+        unsafe {
+            let _ret = splt_thumbnail(sdr_data.as_ptr(), sdr_data.len() as u64, file_name.as_ptr(), requested_width, requested_height, pixels);
+            // should use a BGR palette, reorder RGBA for now
+            let p_u32 = std::slice::from_raw_parts_mut(pixels, requested_width as usize * requested_height as usize);
+            for x in p_u32 {
+                let b = (*x).to_le_bytes();
+                *x = u32::from_le_bytes([b[2], b[1], b[0], b[3]]);
+            }
+        }
     }
 
     log_message("render_sdr_to_hbitmap: Successfully completed rendering");
@@ -176,9 +189,14 @@ pub fn render_sdr_to_hbitmap(sdr_data: &[u8], requested_width: u32, requested_he
 //                 COM Thumbnail Provider Object
 // =================================================================
 
+struct StreamData {
+    stream_bytes: Box<[u8]>,
+    stream_name: String,
+}
+
 #[implement(Shell::PropertiesSystem::IInitializeWithStream, Shell::IThumbnailProvider)]
 struct ThumbnailProvider {
-    sdr_data: Mutex<Option<Arc<[u8]>>>,
+    stream_data: Mutex<Option<Arc<StreamData>>>,
 }
 
 impl Default for ThumbnailProvider {
@@ -186,7 +204,7 @@ impl Default for ThumbnailProvider {
         dll_add_ref();
         log_message("ThumbnailProvider: Created new instance");
         Self {
-            sdr_data: Mutex::new(None),
+            stream_data: Mutex::new(None),
         }
     }
 }
@@ -205,7 +223,7 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
             // log_message("Initialize: Starting SDR data loading");
 
             // Guard against repeated initialization calls
-            if self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
+            if self.stream_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?.is_some() {
                 log_message("Initialize: Error - Already initialized");
                 return Err(Error::from(HRESULT::from_win32(ERROR_ALREADY_INITIALIZED.0)));
             }
@@ -219,11 +237,18 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                     // Fast Fail Check: Ask the stream for its size for a quick rejection.
                     // If the size check fails continue to read the stream in chunks, there is another safety net below.
                     let mut statstg = Default::default();
-                    if unsafe { stream.Stat(&mut statstg, Com::STATFLAG_NONAME) }.is_ok() {
+                    // FIXME: also stat the name to detect the file extension
+                    let mut stream_name = String::default();
+                    if unsafe { stream.Stat(&mut statstg, Com::STATFLAG_DEFAULT) }.is_ok() {
+                        let stream_name_guard = CoTaskMemFreeGuard(statstg.pwcsName);
+                        if let Ok(s) = unsafe { stream_name_guard.0.to_string() } {
+                            stream_name = s;
+                        }
+
                         let stream_size = statstg.cbSize;
                         // log_message(&format!("Initialize: Stream reports size: {} bytes", stream_size));
                         if stream_size > 0 && stream_size > MAX_SIZE {
-                            log_message(&format!("Initialize: Error - File too large: {} bytes (max: {} bytes)", stream_size, MAX_SIZE));
+                            log_message(&format!("Initialize: Error - File too large: {} bytes (max: {} bytes) in {}", stream_size, MAX_SIZE, stream_name));
                             return Err(Error::from(HRESULT::from_win32(ERROR_FILE_TOO_LARGE.0)));
                         }
                     } else {
@@ -265,7 +290,8 @@ impl Shell::PropertiesSystem::IInitializeWithStream_Impl for ThumbnailProvider_I
                     // log_message(&format!("Initialize: Successfully loaded {} bytes of SDR data", buffer.len()));
 
                     // Convert to Arc<[u8]> to save memory overhead
-                    *self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::from(buffer.into_boxed_slice()));
+                    let stream_bytes = buffer.into_boxed_slice();
+                    *self.stream_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))? = Some(Arc::new(StreamData { stream_bytes, stream_name }));
 
                     // log_message("Initialize: Succeeded.");
                     Ok(())
@@ -294,8 +320,8 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
             }
 
             // Clone the Arc (cheap pointer copy) and release the mutex before rendering to prevent deadlocks
-            let sdr_data = {
-                let data_guard = self.sdr_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
+            let stream_data = {
+                let data_guard = self.stream_data.lock().map_err(|_| Error::new(E_FAIL, "Mutex was poisoned"))?;
 
                 match data_guard.as_ref() {
                     Some(data) => {
@@ -309,7 +335,7 @@ impl Shell::IThumbnailProvider_Impl for ThumbnailProvider_Impl {
                 }
             }; // Mutex lock is released here
 
-            match render_sdr_to_hbitmap(&sdr_data[..], cx, cx) {
+            match render_sdr_to_hbitmap(&stream_data.stream_bytes, &stream_data.stream_name, cx, cx) {
                 Ok(hbitmap) => {
                     // log_message("GetThumbnail: render_sdr_to_hbitmap succeeded.");
                     unsafe {
@@ -351,7 +377,7 @@ fn create_fallback_thumbnail(size: u32) -> Result<Gdi::HBITMAP> {
     const FALLBACK_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 256 256\"><g><line stroke-width=\"2\" stroke=\"#ff0000\" y2=\"256\" x2=\"0\" y1=\"0\" x1=\"256\" fill=\"none\"/><line stroke-width=\"2\" y2=\"256\" x2=\"256\" y1=\"0\" x1=\"0\" stroke=\"#ff0000\" fill=\"none\"/></g></svg>";
 
     // Try to render the fallback SVG using our normal rendering pipeline
-    match render_sdr_to_hbitmap(FALLBACK_SVG, size, size) {
+    match render_sdr_to_hbitmap(FALLBACK_SVG, "", size, size) {
         Ok(hbitmap) => {
             log_message("create_fallback_thumbnail: Successfully created SVG-based fallback");
             Ok(hbitmap)
@@ -489,14 +515,14 @@ fn dll_release() {
     log_message(&format!("DLL reference released. New count: {}", old_count - 1));
 }
 
-/// Generic function to read registry values from HKEY_CLASSES_ROOT\.svg
+/// Generic function to read registry values from HKEY_CLASSES_ROOT\.cu8
 /// Returns the value as a u32 if it exists and is a valid DWORD, otherwise returns None
 fn read_sdr_registry_dword(value_name: &str) -> Option<u32> {
     let mut sdr_key: HKEY = HKEY::default();
     let result = unsafe {
         RegOpenKeyExW(
             HKEY_CLASSES_ROOT,
-            w!(".svg"),
+            w!(".cu8"),
             Some(0),
             KEY_READ,
             &mut sdr_key,
@@ -663,19 +689,33 @@ fn create_registry_keys() -> Result<()> {
     inproc_key.set_string_value("", &dll_path)?;
     inproc_key.set_string_value("ThreadingModel", "Apartment")?;
 
-    // Associate with .svg files
-    log_message("create_registry_keys: Associating with .svg files");
-    let sdr_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svg"))?;
-    let sdr_shellex_key = sdr_root_key.create_subkey(&w!("shellex"))?;
-    let sdr_handler_key = sdr_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-    sdr_handler_key.set_string_value("", &clsid_string)?;
+    // All supported file types
+    const ALL_FILE_EXTENSIONS: &[PCWSTR] = &[
+        w!(".cu4"),
+        w!(".cs4"),
+        w!(".cu8"), w!(".complex16u"),
+        w!(".cs8"), w!(".complex16s"),
+        w!(".cu12"),
+        w!(".cs12"),
+        w!(".cu16"),
+        w!(".cs16"),
+        w!(".cu32"),
+        w!(".cs32"),
+        w!(".cu64"),
+        w!(".cs64"),
+        w!(".cf32"), w!(".cfile"), w!(".complex"),
+        w!(".cf64"),
+        w!(".sigmf"),
+    ];
 
-    // Associate with .svgz files
-    log_message("create_registry_keys: Associating with .svgz files");
-    let svgz_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(&w!(".svgz"))?;
-    let svgz_shellex_key = svgz_root_key.create_subkey(&w!("shellex"))?;
-    let svgz_handler_key = svgz_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
-    svgz_handler_key.set_string_value("", &clsid_string)?;
+    // Associate with file extensions
+    log_message("create_registry_keys: Associating with file extensions");
+    for fext in ALL_FILE_EXTENSIONS {
+        let file_root_key = RegistryKeyGuard(HKEY_CLASSES_ROOT).create_subkey(fext)?;
+        let file_shellex_key = file_root_key.create_subkey(&w!("shellex"))?;
+        let file_handler_key = file_shellex_key.create_subkey(&w!("{E357FCCD-A995-4576-B01F-234630154E96}"))?;
+        file_handler_key.set_string_value("", &clsid_string)?;
+    }
 
     // log_message("create_registry_keys: Notifying shell of association changes");
     unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };
@@ -823,8 +863,27 @@ fn delete_registry_keys() -> Result<()> {
     let clsid_path = to_pcwstr(&format!("CLSID\\{}", clsid_string));
     delete_key_with_error_tracking(PCWSTR(clsid_path.as_ptr()));
 
-    delete_key_with_error_tracking(w!(".svg\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"));
-    delete_key_with_error_tracking(w!(".svgz\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"));
+    // All supported file types
+    const ALL_FILE_EXTENSIONS: &[PCWSTR] = &[
+        w!(".cu4\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs4\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cu8\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), w!(".complex16u\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs8\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), w!(".complex16s\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cu12\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs12\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cu16\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs16\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cu32\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs32\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cu64\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cs64\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cf32\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), w!(".cfile\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"), w!(".complex\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".cf64\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+        w!(".sigmf\\shellex\\{E357FCCD-A995-4576-B01F-234630154E96}"),
+    ];
+    for &fext in ALL_FILE_EXTENSIONS {
+        delete_key_with_error_tracking(fext);
+    }
 
     // Always notify of association changes, even if some deletions failed
     unsafe { Shell::SHChangeNotify(Shell::SHCNE_ASSOCCHANGED, Shell::SHCNF_IDLIST, None, None) };

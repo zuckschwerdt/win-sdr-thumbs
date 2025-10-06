@@ -1,7 +1,13 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
+    let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let build_target = env::var("TARGET").unwrap();
+    let lib_dir = Path::new(&crate_dir).join("lib").join(build_target);
+    let lib_dir = lib_dir.to_str().unwrap();
+    println!("cargo:rustc-link-search={lib_dir}");
+
     let out_dir = env::var("OUT_DIR").unwrap();
 
     // Detect target architecture
