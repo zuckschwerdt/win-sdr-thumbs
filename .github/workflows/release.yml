@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    name: Release native
+    steps:
+      - name: Versions
+        run: |
+          cargo --version
+          rustc --version
+
+      - uses: actions/checkout@v4
+
+      - name: Create Release Info
+        # e.g. refs/tags/0.1
+        run: |
+          echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      - uses: softprops/action-gh-release@v2
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          draft: true
+          prerelease: true
+
+      - name: Install x86_64-pc-windows-msvc Target
+        run: rustup target add x86_64-pc-windows-msvc
+      - name: Install i686-pc-windows-msvc Target
+        run: rustup target add i686-pc-windows-msvc
+      - name: Install aarch64-pc-windows-msvc Target
+        run: rustup target add aarch64-pc-windows-msvc
+
+      - name: Run x86_64-pc-windows-msvc Build
+        run: cargo build --release --verbose --target x86_64-pc-windows-msvc
+      - name: Run i686-pc-windows-msvc Build
+        run: cargo build --release --verbose --target i686-pc-windows-msvc
+      - name: Run aarch64-pc-windows-msvc Build
+        run: cargo build --release --verbose --target aarch64-pc-windows-msvc
+
+      - name: Upload Release Asset
+        working-directory: target
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIP_FILE: win_sdr_thumbs-${{ env.RELEASE_VERSION }}.zip
+        run: |
+          zip --junk-paths $ZIP_FILE */release/win_sdr_thumbs_*.dll
+          gh release upload ${{ env.RELEASE_VERSION }} $ZIP_FILE
+
