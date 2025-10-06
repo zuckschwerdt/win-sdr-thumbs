@@ -3,7 +3,7 @@
 
     <!-- GUIDs -->
     <?define UpgradeCodeGuid = "e345203a-2e6e-4854-9797-fb94221a839a" ?>
-    <?define Clsid = "{a884a812-58fd-47d5-bda6-4fab4fabdcd9}" ?>
+    <?define Clsid = "{adfa4c4b-5cfb-4335-be68-d4d60f2ab71f}" ?>
     <?define ComponentGuidX64 = "f8ee4ddf-0fbb-4680-8a10-9960182540e6" ?>
     <?define ComponentGuidX86 = "eed77e44-a1ff-4bcc-92ce-c80718657270" ?>
     <?define ComponentGuidArm64 = "f44673ee-317d-4d1e-94f6-9b3efd1b50bb" ?>
@@ -71,8 +71,8 @@
 
                 <?if $(sys.BUILDARCH) = x64 ?>
                     <File Id="File_64bit"
-                            Name="win_svg_thumbs_x64.dll"
-                            Source="win_svg_thumbs_x64.dll"
+                            Name="win_sdr_thumbs_x64.dll"
+                            Source="win_sdr_thumbs_x64.dll"
                             KeyPath="yes"
                             Vital="yes"
                             PatchWholeFile="yes"
@@ -81,8 +81,8 @@
 
                 <?if $(sys.BUILDARCH) = arm64 ?>
                     <File Id="File_64bit"
-                            Name="win_svg_thumbs_arm64.dll"
-                            Source="win_svg_thumbs_arm64.dll"
+                            Name="win_sdr_thumbs_arm64.dll"
+                            Source="win_sdr_thumbs_arm64.dll"
                             KeyPath="yes"
                             Vital="yes"
                             PatchWholeFile="yes"
@@ -112,8 +112,8 @@
             <!-- ========================= 32-bit DLL Component ========================= -->
             <Component Id="Component_x86" Guid="$(var.ComponentGuidX86)" Bitness="always32" Directory="INSTALLFOLDER_X86">
                 <File Id="File_x86"
-                        Name="win_svg_thumbs_x86.dll"
-                        Source="win_svg_thumbs_x86.dll"
+                        Name="win_sdr_thumbs_x86.dll"
+                        Source="win_sdr_thumbs_x86.dll"
                         KeyPath="yes"
                         Vital="yes"
                         PatchWholeFile="yes"

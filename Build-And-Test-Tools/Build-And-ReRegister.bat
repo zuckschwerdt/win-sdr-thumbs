@@ -11,13 +11,13 @@ if %errorLevel% neq 0 (
 )
 
 :: Unregister the previous DLL version
-regsvr32 /u "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
+regsvr32 /u "%~dp0..\target\x86_64-pc-windows-msvc\release\win_sdr_thumbs_x64.dll"
 
 
 :: Get the absolute path to the DLL
 set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%\.."
-set "DLL_PATH=%CD%\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
+set "DLL_PATH=%CD%\target\x86_64-pc-windows-msvc\release\win_sdr_thumbs_x64.dll"
 popd
 ::echo  "%DLL_PATH%"
 
@@ -32,9 +32,9 @@ cargo build --release --target=i686-pc-windows-msvc
 cargo build --release --target=aarch64-pc-windows-msvc
 
 :: Re-register the new DLL version. Only bother re-registering the 64 bit one.
-regsvr32 "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll"
+regsvr32 "%~dp0..\target\x86_64-pc-windows-msvc\release\win_sdr_thumbs_x64.dll"
 
 :: Copy each DLL to the MSI Installer folder
-copy /Y "%~dp0..\target\x86_64-pc-windows-msvc\release\win_svg_thumbs_x64.dll" "%~dp0MSI Installer\win_svg_thumbs_x64.dll"
-copy /Y "%~dp0..\target\i686-pc-windows-msvc\release\win_svg_thumbs_x86.dll" "%~dp0MSI Installer\win_svg_thumbs_x86.dll"
-copy /Y "%~dp0..\target\aarch64-pc-windows-msvc\release\win_svg_thumbs_arm64.dll" "%~dp0MSI Installer\win_svg_thumbs_arm64.dll"
+copy /Y "%~dp0..\target\x86_64-pc-windows-msvc\release\win_sdr_thumbs_x64.dll" "%~dp0MSI Installer\win_sdr_thumbs_x64.dll"
+copy /Y "%~dp0..\target\i686-pc-windows-msvc\release\win_sdr_thumbs_x86.dll" "%~dp0MSI Installer\win_sdr_thumbs_x86.dll"
+copy /Y "%~dp0..\target\aarch64-pc-windows-msvc\release\win_sdr_thumbs_arm64.dll" "%~dp0MSI Installer\win_sdr_thumbs_arm64.dll"

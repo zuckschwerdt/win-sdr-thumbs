@@ -6,11 +6,11 @@ To automatically build the MSI installer with the version parsed from cargo.toml
 
 
 Or to build manually, run this command to build the MSI installer, replacing with whatever actual version:
-	wix build win_svg_thumbs.wxs -d ProductVersion="1.0.0.0" -arch x64 -ext WixToolset.UI.wixext
+	wix build win_sdr_thumbs.wxs -d ProductVersion="1.0.0.0" -arch x64 -ext WixToolset.UI.wixext
 
 
 Notes:
-	- It expects the DLL to be two levels up then in "target\x86_64-pc-windows-msvc\release\win_svg_thumbs.dll". To change the path of the DLL relative to the .wxs file, open the .wxs file and change the "DllSourcePath" value near the top.
+	- It expects the DLL to be two levels up then in "target\x86_64-pc-windows-msvc\release\win_sdr_thumbs.dll". To change the path of the DLL relative to the .wxs file, open the .wxs file and change the "DllSourcePath" value near the top.
 
 --------------------------------------------------------
 
@@ -23,7 +23,7 @@ GUIDS used by the MSI Installer and DLL
 		x86 Component GUID: 	eed77e44-a1ff-4bcc-92ce-c80718657270
 		arm64 Component GUID: 	f44673ee-317d-4d1e-94f6-9b3efd1b50bb
 
-	- My Thumbnail Handler CLSID: 		{a884a812-58fd-47d5-bda6-4fab4fabdcd9}
+	- My Thumbnail Handler CLSID: 		{adfa4c4b-5cfb-4335-be68-d4d60f2ab71f}
 
 	- Windows IThumbnailProvider CLSID:	{E357FCCD-A995-4576-B01F-234630154E96}
 		(This one is built into Windows and was not generated)
@@ -33,8 +33,8 @@ GUIDS used by the MSI Installer and DLL
 
 Resulting Registry Paths:
 
-	HKEY_CLASSES_ROOT\CLSID\{A884A812-58FD-47D5-BDA6-4FAB4FABDCD9}
-	HKEY_CLASSES_ROOT\WOW6432Node\CLSID\{A884A812-58FD-47D5-BDA6-4FAB4FABDCD9}
+	HKEY_CLASSES_ROOT\CLSID\{ADFA4C4B-5CFB-4335-BE68-D4D60F2AB71F}
+	HKEY_CLASSES_ROOT\WOW6432Node\CLSID\{ADFA4C4B-5CFB-4335-BE68-D4D60F2AB71F}
 
 	HKEY_CLASSES_ROOT\.svg\shellex\{E357FCCD-A995-4576-B01F-234630154E96}
 	HKEY_CLASSES_ROOT\.svgz\shellex\{E357FCCD-A995-4576-B01F-234630154E96}

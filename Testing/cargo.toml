@@ -11,7 +11,7 @@ path = "src/main.rs"
 windows_subsystem = "windows"
 
 [dependencies]
-win_svg_thumbs = { path = ".." }
+win_sdr_thumbs = { path = ".." }
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

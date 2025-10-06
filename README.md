@@ -51,7 +51,7 @@ winget install ThioJoe.SvgThumbnailExtension
 
 
 ### Option 2: Download the Installer
-1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
+1.  Go to the [Releases](https://github.com/zuckschwerdt/win-sdr-thumbs/releases) page.
 2.  For the latest release, look under `Assets` and download the `.msi` installer and run it.
 3.  Windows Explorer will now automatically use this provider to display thumbnails for `.svg` and `.svgz` files.
 
@@ -101,20 +101,20 @@ When Windows Explorer needs a thumbnail for a `.svg` file, it interacts with thi
 
 ## How to Manually Register DLL Yourself (Advanced)
 If you want to manually register the DLL yourself instead of using the MSI installer, follow these steps:
-1.  Go to the [Releases](https://github.com/ThioJoe/win-svg-thumbs-rust/releases) page.
-2.  Download the latest `win_svg_thumbs.dll` file.
+1.  Go to the [Releases](https://github.com/zuckschwerdt/win-sdr-thumbs/releases) page.
+2.  Download the latest `win_sdr_thumbs.dll` file.
      - **IMPORTANT:** For security, place it somewhere that requires admin access to write, such as making a folder in `C:\Program Files`
 4.  Open a Command Prompt with **administrator privileges**.
      - (Administrator is required or you will get error `0x80004005` for lack of permission)
 5.  Navigate to the directory where you saved the `.dll` file.
 6.  Run the following command to register the DLL:
     ```
-    regsvr32 win_svg_thumbs.dll
+    regsvr32 win_sdr_thumbs.dll
     ```
 
 To uninstall, run the following command in an administrator Command Prompt:
   ```
-  regsvr32 /u win_svg_thumbs.dll
+  regsvr32 /u win_sdr_thumbs.dll
   ```
 
 ## How to Compile it Yourself
@@ -127,11 +127,11 @@ To uninstall, run the following command in an administrator Command Prompt:
 
 1.  Clone the repository:
     ```
-    git clone https://github.com/ThioJoe/win-svg-thumbs-rust
+    git clone https://github.com/zuckschwerdt/win-sdr-thumbs
     ```
 2.  Navigate to the project directory:
     ```
-    cd win-svg-thumbs-rust
+    cd win-sdr-thumbs
     ```
 3.  Build the project in release mode:
     ```

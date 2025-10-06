@@ -1447,7 +1447,7 @@ fn check_hardware_acceleration_registry() {
     // log_message("Checking registry for hardware acceleration preference...");
 
     // Default to WARP (software rendering) for stability
-    let use_hardware = match read_svg_registry_dword("win_svg_thumbs_use_hardware") {
+    let use_hardware = match read_svg_registry_dword("win_sdr_thumbs_use_hardware") {
         Some(1) => {
             log_message("Registry: Hardware acceleration ENABLED");
             true  // Only enable hardware if value exists and equals 1
@@ -1468,7 +1468,7 @@ fn check_hardware_acceleration_registry() {
 // Checks registry for setting for whether to enable debug logging
 fn check_debug_logging_registry() {
     // Note: We can't log here initially since logging might not be enabled yet
-    let enable_debug = match read_svg_registry_dword("win_svg_thumbs_enable_debug_log") {
+    let enable_debug = match read_svg_registry_dword("win_sdr_thumbs_enable_debug_log") {
         Some(1) => true,  // Only enable debug logging if value exists and equals 1
         _ => false,       // Default to disabled for any other case (missing, 0, or other values)
     };
@@ -1483,7 +1483,7 @@ fn check_debug_logging_registry() {
 
 // This is our thumbnail provider's unique Class ID (CLSID).
 // Use a new GUID for your own projects!
-const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xa884a812_58fd_47d5_bda6_4fab4fabdcd9);
+const CLSID_SVG_THUMBNAIL_PROVIDER: GUID = GUID::from_u128(0xadfa4c4b_5cfb_4335_be68_d4d60f2ab71f);
 
 #[no_mangle]
 #[allow(non_snake_case)]
@@ -1840,7 +1840,7 @@ fn log_message(message: &str) {
             Err(_) => return None, // Conversion failed, cache 'None'
         };
 
-        path.push("win_svg_thumbs_debug_log.txt");
+        path.push("win_sdr_thumbs_debug_log.txt");
         Some(path) // Success! Cache the full path.
         // --- End of one-time execution block ---
     });

@@ -11,7 +11,7 @@ use windows::{
     },
 };
 
-use win_svg_thumbs::render_svg_to_hbitmap;
+use win_sdr_thumbs::render_svg_to_hbitmap;
 
 // Global variable to store the HBITMAP so it can be accessed in the window procedure
 static mut GLOBAL_HBITMAP: HBITMAP = HBITMAP(ptr::null_mut());

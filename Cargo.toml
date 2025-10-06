@@ -2,11 +2,11 @@
 members = [
     ".",
     "Testing",
-    # "win_svg_thumbs"
+    # "win_sdr_thumbs"
 ]
 
 [package]
-name = "win_svg_thumbs"
+name = "win_sdr_thumbs"
 version = "1.9.0"
 edition = "2021"
 build = "build.rs"

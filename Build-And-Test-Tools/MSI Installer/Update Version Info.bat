@@ -52,7 +52,7 @@ echo         VALUE "FileVersion", "%PRODUCT_VERSION%\0"
 echo         VALUE "ProductName", "Thio's SVG Thumbnail Extension\0"
 echo         VALUE "InternalName", "Thio's SVG Thumbnail Extension\0"
 echo         VALUE "LegalCopyright", "Copyright 2025\0"
-echo         VALUE "OriginalFilename", "win_svg_thumbs_x64.dll\0"
+echo         VALUE "OriginalFilename", "win_sdr_thumbs_x64.dll\0"
 echo         VALUE "ProductVersion", "%PRODUCT_VERSION%\0"
 echo     }
 echo }
@@ -75,7 +75,7 @@ IF ERRORLEVEL 1 (
 )
 
 REM Update x64 DLL if it exists
-SET "DLL_X64=win_svg_thumbs_x64.dll"
+SET "DLL_X64=win_sdr_thumbs_x64.dll"
 IF EXIST "%DLL_X64%" (
     echo Updating version info for x64 DLL...
     ResourceHacker.exe -open "%DLL_X64%" -save "%DLL_X64%" -resource resources.res -action addoverwrite -mask VersionInfo, -log CONSOLE
@@ -89,7 +89,7 @@ IF EXIST "%DLL_X64%" (
 )
 
 REM Update x86 DLL if it exists
-SET "DLL_X86=win_svg_thumbs_x86.dll"
+SET "DLL_X86=win_sdr_thumbs_x86.dll"
 IF EXIST "%DLL_X86%" (
     echo Updating version info for x86 DLL...
     REM Create x86-specific resource file
@@ -110,7 +110,7 @@ IF EXIST "%DLL_X86%" (
     echo         VALUE "ProductName", "Thio's SVG Thumbnail Extension\0"
     echo         VALUE "InternalName", "Thio's SVG Thumbnail Extension\0"
     echo         VALUE "LegalCopyright", "Copyright 2025\0"
-    echo         VALUE "OriginalFilename", "win_svg_thumbs_x86.dll\0"
+    echo         VALUE "OriginalFilename", "win_sdr_thumbs_x86.dll\0"
     echo         VALUE "ProductVersion", "%PRODUCT_VERSION%\0"
     echo     }
     echo }
@@ -134,7 +134,7 @@ IF EXIST "%DLL_X86%" (
 )
 
 REM Update x86 DLL if it exists
-SET "DLL_ARM64=win_svg_thumbs_arm64.dll"
+SET "DLL_ARM64=win_sdr_thumbs_arm64.dll"
 IF EXIST "%DLL_ARM64%" (
     echo Updating version info for ARM64 DLL...
     REM Create ARM64-specific resource file
@@ -155,7 +155,7 @@ IF EXIST "%DLL_ARM64%" (
     echo         VALUE "ProductName", "Thio's SVG Thumbnail Extension\0"
     echo         VALUE "InternalName", "Thio's SVG Thumbnail Extension\0"
     echo         VALUE "LegalCopyright", "Copyright 2025\0"
-    echo         VALUE "OriginalFilename", "win_svg_thumbs_arm64.dll\0"
+    echo         VALUE "OriginalFilename", "win_sdr_thumbs_arm64.dll\0"
     echo         VALUE "ProductVersion", "%PRODUCT_VERSION%\0"
     echo     }
     echo }
